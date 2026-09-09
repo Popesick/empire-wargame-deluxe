@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EMPIRE: Wargame Deluxe</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- TITLE SCREEN -->
+<div id="title-screen">
+  <canvas id="title-canvas" width="900" height="360"></canvas>
+  <div class="title-text">
+    <h1>EMPIRE</h1>
+    <h2>WARGAME DELUXE</h2>
+  </div>
+  <div class="menu">
+    <button id="start-btn">▶ NEUES SPIEL</button>
+    <button id="mute-btn">🔊 MUSIK AN</button>
+  </div>
+  <p class="hint">Erobere alle Städte des Gegners, bevor er deine Hauptstadt einnimmt.</p>
+  <p class="credit">von Andreas &amp; Claude — im Stil klassischer Rundenstrategie</p>
+</div>
+
+<!-- KARTENOPTIONEN -->
+<div id="setup-screen" class="hidden">
+  <h2 class="setup-title">KARTENOPTIONEN</h2>
+
+  <div class="setup-group">
+    <span class="setup-label">Kartengröße</span>
+    <div class="setup-options" data-group="size">
+      <button class="setup-opt" data-value="small">Klein</button>
+      <button class="setup-opt active" data-value="medium">Mittel</button>
+      <button class="setup-opt" data-value="large">Groß</button>
+    </div>
+  </div>
+
+  <div class="setup-group">
+    <span class="setup-label">Landmasse / Wasser</span>
+    <div class="setup-options" data-group="water">
+      <button class="setup-opt" data-value="dry">Trocken</button>
+      <button class="setup-opt active" data-value="normal">Ausgewogen</button>
+      <button class="setup-opt" data-value="wet">Wasserreich</button>
+    </div>
+  </div>
+
+  <div class="setup-group">
+    <span class="setup-label">Stadtdichte</span>
+    <div class="setup-options" data-group="cities">
+      <button class="setup-opt" data-value="sparse">Wenige</button>
+      <button class="setup-opt active" data-value="normal">Normal</button>
+      <button class="setup-opt" data-value="dense">Viele</button>
+    </div>
+  </div>
+
+  <p class="setup-hint">"Trocken" erzeugt eine reine Landkarte — Zerstörer und U-Boote sind dann nirgends baubar.</p>
+
+  <div class="menu">
+    <button id="setup-start-btn">▶ Spiel starten</button>
+    <button id="setup-back-btn">◀ Zurück</button>
+  </div>
+</div>
+
+<!-- GAME SCREEN -->
+<div id="game-screen" class="hidden">
+  <div id="hud">
+    <div id="hud-left">
+      <span id="turn-indicator">Runde 1 — Dein Zug</span>
+    </div>
+    <div id="hud-center">
+      <span id="stats-player">🟦 Du: <b id="player-cities">0</b> Städte / <b id="player-units">0</b> Einheiten</span>
+      <span id="stats-ai">🟥 Gegner: <b id="ai-cities">0</b> Städte / <b id="ai-units">0</b> Einheiten</span>
+    </div>
+    <div id="hud-right">
+      <button id="info-btn" title="Einheiten-Übersicht">ℹ Einheiten</button>
+      <button id="zoom-out-btn" title="Rauszoomen">－</button>
+      <button id="zoom-in-btn" title="Reinzoomen">＋</button>
+      <button id="home-btn" title="Zur Hauptstadt">🏠</button>
+      <button id="mute-btn-2">🔊</button>
+      <button id="end-turn-btn">Zug beenden ⏭</button>
+    </div>
+  </div>
+  <div id="map-wrap">
+    <canvas id="game-canvas"></canvas>
+    <canvas id="minimap-canvas" width="190" height="126" title="Klicken zum Springen"></canvas>
+
+    <div id="build-panel" class="hidden">
+      <div class="build-panel-header">
+        <span id="build-city-title">Stadt</span>
+        <button id="build-close-btn">×</button>
+      </div>
+      <div id="build-progress-label"></div>
+      <div id="build-progress-wrap"><div id="build-progress-bar"></div></div>
+      <div id="build-options"></div>
+    </div>
+
+    <div id="unit-info-panel" class="hidden">
+      <div class="build-panel-header">
+        <span>Einheiten-Übersicht</span>
+        <button id="info-close-btn">×</button>
+      </div>
+      <table id="unit-info-table"></table>
+    </div>
+  </div>
+  <div id="info-panel">Wähle eine Einheit aus, um sie zu bewegen oder anzugreifen.</div>
+  <div id="unit-actions"></div>
+</div>
+
+<!-- GAME OVER OVERLAY -->
+<div id="game-over" class="hidden">
+  <div class="go-box">
+    <h2 id="go-title">SIEG!</h2>
+    <p id="go-text"></p>
+    <button id="restart-btn">↻ Neues Spiel</button>
+  </div>
+</div>
+
+<script src="game.js"></script>
+</body>
+</html>

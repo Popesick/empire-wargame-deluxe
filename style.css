@@ -1,0 +1,484 @@
+:root{
+  --bg:#0a0e14;
+  --panel:#121826;
+  --panel-border:#2a3550;
+  --gold:#e0b84a;
+  --player:#3fa9f5;
+  --ai:#f5473f;
+  --neutral:#8a8f9a;
+  --text:#e7ecf5;
+  font-family:'VT323', monospace;
+}
+
+*{box-sizing:border-box;}
+
+html,body{
+  margin:0;
+  padding:0;
+  width:100%;
+  height:100%;
+  background:var(--bg);
+  color:var(--text);
+  overflow:hidden;
+}
+
+.hidden{display:none !important;}
+
+/* ---------- TITLE SCREEN ---------- */
+#title-screen{
+  position:relative;
+  width:100%;
+  height:100vh;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  background:radial-gradient(ellipse at center, #16233d 0%, #0a0e14 75%);
+  text-align:center;
+}
+
+#title-canvas{
+  position:absolute;
+  top:0; left:0;
+  width:100%;
+  height:100%;
+  z-index:0;
+}
+
+.title-text{
+  position:relative;
+  z-index:1;
+  margin-bottom:10px;
+}
+
+.title-text h1{
+  font-family:'Press Start 2P', monospace;
+  font-size:64px;
+  margin:0;
+  color:var(--gold);
+  letter-spacing:6px;
+  text-shadow:0 0 20px rgba(224,184,74,0.6), 4px 4px 0 #5a3c0a;
+}
+
+.title-text h2{
+  font-family:'Press Start 2P', monospace;
+  font-size:20px;
+  margin:14px 0 0 0;
+  color:var(--text);
+  letter-spacing:4px;
+  text-shadow:2px 2px 0 #000;
+}
+
+.menu{
+  position:relative;
+  z-index:1;
+  display:flex;
+  gap:16px;
+  margin-top:28px;
+}
+
+.menu button, #restart-btn{
+  font-family:'Press Start 2P', monospace;
+  font-size:14px;
+  padding:14px 22px;
+  background:var(--panel);
+  border:3px solid var(--gold);
+  color:var(--gold);
+  cursor:pointer;
+  box-shadow:4px 4px 0 #000;
+  transition:transform 0.08s ease;
+}
+
+.menu button:hover, #restart-btn:hover{
+  transform:translate(-2px,-2px);
+  box-shadow:6px 6px 0 #000;
+  background:#1c2740;
+}
+
+.menu button:active, #restart-btn:active{
+  transform:translate(2px,2px);
+  box-shadow:1px 1px 0 #000;
+}
+
+.hint{
+  position:relative;
+  z-index:1;
+  font-size:20px;
+  color:#aab4c8;
+  margin-top:26px;
+  max-width:600px;
+}
+
+.credit{
+  position:relative;
+  z-index:1;
+  font-size:15px;
+  color:#5a6478;
+  margin-top:8px;
+}
+
+/* ---------- KARTENOPTIONEN ---------- */
+#setup-screen{
+  width:100%;
+  height:100vh;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  background:radial-gradient(ellipse at center, #16233d 0%, #0a0e14 75%);
+  text-align:center;
+}
+
+.setup-title{
+  font-family:'Press Start 2P', monospace;
+  font-size:22px;
+  color:var(--gold);
+  letter-spacing:2px;
+  margin-bottom:30px;
+}
+
+.setup-group{
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:10px;
+  margin-bottom:22px;
+}
+
+.setup-label{
+  font-size:20px;
+  color:#aab4c8;
+}
+
+.setup-options{
+  display:flex;
+  gap:10px;
+}
+
+.setup-opt{
+  font-family:'VT323', monospace;
+  font-size:19px;
+  padding:10px 20px;
+  background:var(--panel);
+  border:2px solid var(--panel-border);
+  color:var(--text);
+  cursor:pointer;
+}
+
+.setup-opt:hover{
+  border-color:var(--gold);
+}
+
+.setup-opt.active{
+  border-color:var(--gold);
+  background:#2a3a1c;
+  color:var(--gold);
+}
+
+.setup-hint{
+  font-size:16px;
+  color:#5a6478;
+  max-width:520px;
+  margin:6px 0 10px 0;
+}
+
+/* ---------- GAME SCREEN ---------- */
+#game-screen{
+  width:100%;
+  height:100vh;
+  display:flex;
+  flex-direction:column;
+}
+
+#hud{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:10px 18px;
+  background:var(--panel);
+  border-bottom:3px solid var(--panel-border);
+  font-size:22px;
+  flex-wrap:wrap;
+  gap:10px;
+}
+
+#hud-center{
+  display:flex;
+  gap:24px;
+}
+
+#stats-player{color:var(--player);}
+#stats-ai{color:var(--ai);}
+
+#turn-indicator{
+  font-family:'Press Start 2P', monospace;
+  font-size:14px;
+  color:var(--gold);
+}
+
+#hud-right{
+  display:flex;
+  gap:10px;
+  align-items:center;
+}
+
+#end-turn-btn, #mute-btn-2, #zoom-in-btn, #zoom-out-btn, #home-btn, #info-btn{
+  font-family:'VT323', monospace;
+  font-size:20px;
+  padding:8px 16px;
+  background:#1c2740;
+  border:2px solid var(--panel-border);
+  color:var(--text);
+  cursor:pointer;
+}
+
+#zoom-in-btn, #zoom-out-btn, #home-btn{
+  padding:8px 12px;
+}
+
+#end-turn-btn:hover, #mute-btn-2:hover, #zoom-in-btn:hover, #zoom-out-btn:hover, #home-btn:hover, #info-btn:hover{
+  background:#26335a;
+  border-color:var(--gold);
+}
+
+#map-wrap{
+  position:relative;
+  flex:1;
+  overflow:hidden;
+}
+
+#game-canvas{
+  display:block;
+  width:100%;
+  height:100%;
+  background:#0d1220;
+  cursor:grab;
+  image-rendering:pixelated;
+}
+
+#game-canvas.dragging{
+  cursor:grabbing;
+}
+
+#minimap-canvas{
+  position:absolute;
+  left:12px;
+  bottom:12px;
+  border:2px solid var(--panel-border);
+  background:rgba(10,14,20,0.9);
+  cursor:pointer;
+  z-index:4;
+}
+
+#info-panel{
+  padding:10px 18px 4px 18px;
+  background:var(--panel);
+  font-size:20px;
+  min-height:28px;
+  color:#c8d0e0;
+}
+
+#unit-actions{
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+  padding:0 18px 10px 18px;
+  background:var(--panel);
+  border-top:3px solid var(--panel-border);
+  min-height:20px;
+}
+
+#unit-actions:empty{
+  padding:0 18px;
+  border-top:none;
+}
+
+.unit-action-btn{
+  font-family:'VT323', monospace;
+  font-size:17px;
+  padding:6px 14px;
+  background:#1c2740;
+  border:2px solid var(--panel-border);
+  color:var(--text);
+  cursor:pointer;
+}
+
+.unit-action-btn:hover{
+  border-color:var(--gold);
+  background:#26335a;
+}
+
+.unit-action-btn.toggled{
+  border-color:var(--gold);
+  background:#3a4a1c;
+  color:var(--gold);
+}
+
+/* ---------- BUILD PANEL / UNIT INFO ---------- */
+#build-panel, #unit-info-panel{
+  position:absolute;
+  right:12px;
+  top:12px;
+  width:250px;
+  background:var(--panel);
+  border:2px solid var(--gold);
+  box-shadow:4px 4px 0 rgba(0,0,0,0.4);
+  z-index:5;
+  font-size:18px;
+}
+
+#unit-info-panel{
+  width:420px;
+}
+
+.build-panel-header{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  background:#1c2740;
+  padding:8px 12px;
+  font-family:'Press Start 2P', monospace;
+  font-size:11px;
+  color:var(--gold);
+}
+
+.build-panel-header button{
+  background:none;
+  border:none;
+  color:var(--text);
+  font-size:20px;
+  cursor:pointer;
+  line-height:1;
+}
+
+.build-panel-header button:hover{
+  color:var(--ai);
+}
+
+#build-progress-label{
+  padding:8px 12px 0 12px;
+  color:#c8d0e0;
+  font-size:17px;
+}
+
+#build-progress-wrap{
+  margin:6px 12px;
+  height:12px;
+  background:#0a0e14;
+  border:1px solid var(--panel-border);
+}
+
+#build-progress-bar{
+  height:100%;
+  width:0%;
+  background:var(--gold);
+  transition:width 0.2s ease;
+}
+
+#build-options{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  padding:10px 12px 12px 12px;
+  max-height:50vh;
+  overflow-y:auto;
+}
+
+.build-option{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  background:#1c2740;
+  border:2px solid var(--panel-border);
+  color:var(--text);
+  padding:8px 10px;
+  cursor:pointer;
+  font-family:'VT323', monospace;
+  font-size:17px;
+  text-align:left;
+}
+
+.build-option:hover{
+  border-color:var(--gold);
+}
+
+.build-option.active{
+  border-color:var(--gold);
+  background:#2a3a1c;
+}
+
+.build-option.disabled{
+  opacity:0.4;
+  cursor:not-allowed;
+}
+.build-option.disabled:hover{
+  border-color:var(--panel-border);
+}
+
+.build-option .bo-name{
+  color:var(--gold);
+}
+
+.build-option .bo-stats{
+  color:#8a93a8;
+  font-size:14px;
+}
+
+.build-option .bo-cost{
+  color:var(--text);
+  font-weight:bold;
+}
+
+#unit-info-table{
+  width:100%;
+  border-collapse:collapse;
+  padding:10px 12px 14px 12px;
+  font-size:15px;
+}
+
+#unit-info-table th, #unit-info-table td{
+  padding:6px 10px;
+  text-align:center;
+  border-bottom:1px solid var(--panel-border);
+}
+
+#unit-info-table th{
+  color:var(--gold);
+  font-size:13px;
+}
+
+#unit-info-table td:first-child, #unit-info-table th:first-child{
+  text-align:left;
+}
+
+/* ---------- GAME OVER ---------- */
+#game-over{
+  position:fixed;
+  top:0; left:0; width:100%; height:100%;
+  background:rgba(5,7,12,0.88);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  z-index:10;
+}
+
+.go-box{
+  background:var(--panel);
+  border:3px solid var(--gold);
+  padding:40px 60px;
+  text-align:center;
+  box-shadow:0 0 40px rgba(224,184,74,0.3);
+}
+
+.go-box h2{
+  font-family:'Press Start 2P', monospace;
+  font-size:36px;
+  color:var(--gold);
+  margin:0 0 20px 0;
+}
+
+.go-box p{
+  font-size:24px;
+  color:var(--text);
+  margin-bottom:26px;
+}
