@@ -3,23 +3,10 @@
 /* =========================================================
    EMPIRE: WARGAME DELUXE
    Rundenbasiertes Strategiespiel im Empire-Stil.
-
-   Umgesetztes "Kernpaket" der Originalregeln:
-   - Terrain-Bewegungskosten & Straßen
-   - Welt-Ebenen (Luft / Boden / U-Boot-Tiefe) mit Stapel- &
-     Ziel-Prioritätsregeln
-   - Kill-, Capture- und Bombard-/Fernkampf mit
-     wahrscheinlichkeitsbasierten Kampfrunden
-   - Angeschlagen (crippled) & Reparatur, Eingraben (Dig-in)
-   - Effektivität (Fresh..Exhausted) & Erfahrung (Green..Hardened)
-   - Transport: Laden/Entladen von Bodeneinheiten auf Zerstörern
-   - Defensivfeuer (vereinfacht, siehe Kommentare)
-
-   Bewusst NICHT umgesetzt (siehe Chat-Zusammenfassung):
-   Wetter, Verträge/Diplomatie, Ressourcen-Drain &
-   Produktionseffizienz-Kurven, Orbital-Einheiten/Atomwaffen,
-   Minen, Sichtbarkeits-/Explorationsmodi, Gifting/PBM,
-   alternative Sieg-Bedingungen, Konstruktion durch Pioniere.
+   Mehrspieler (1-4 KI-Gegner, freie Feindschaft, keine Diplomatie),
+   Kontinent-/Insel-Karten, Land/See/Luft-Einheiten inkl. Träger,
+   Schlacht- und Transportschiffe, Wegpunkt-Marschbefehle,
+   Rasten/Warten/Befestigen-Stationsbefehle.
    ========================================================= */
 
 /* ---------- AUDIO: prozeduraler Chiptune-Loop ---------- */
@@ -89,23 +76,22 @@ const MusicEngine = (() => {
   };
 })();
 
-/* ---------- KONSTANTEN ---------- */
-// COLS/ROWS sind veränderlich: die Kartenoptionen (Größe) setzen sie vor
-// generateMap() neu. Alle anderen Konstanten bleiben fix.
+/* ---------- KONSTANTEN: KARTE ---------- */
 let COLS = 26, ROWS = 17;
 const BASE_TILE = 48;
-const MIN_ZOOM = 0.5, MAX_ZOOM = 2.2;
+const MIN_ZOOM = 0.4, MAX_ZOOM = 2.2;
 const DIRS8 = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
+const DIRS4 = [[1,0],[-1,0],[0,1],[0,-1]];
 
+// Kartengrößen (vervierfachte Fläche gegenüber der ursprünglichen Version)
 const SIZE_PRESETS = {
-  small:  { cols:18, rows:12 },
-  medium: { cols:26, rows:17 },
-  large:  { cols:34, rows:22 }
+  small:  { cols:36, rows:24 },
+  medium: { cols:52, rows:34 },
+  large:  { cols:68, rows:44 }
 };
-const WATER_LEVEL = { dry:0, normal:1, wet:2 };
 const CITY_TILES_PER_CITY = { sparse:70, normal:44, dense:28 };
 
-let mapConfig = { size:'medium', water:'normal', cities:'normal' };
+let mapConfig = { size:'medium', landform:'continent', cities:'normal', aiCount:1 };
 
 const T_PLAIN = 'plain';
 const T_FOREST = 'forest';
@@ -115,32 +101,48 @@ const T_WATER = 'water';
 const T_CITY = 'city';
 
 const MOVE_COST = { [T_PLAIN]:1, [T_FOREST]:2, [T_HILLS]:2, [T_MOUNTAIN]:3, [T_WATER]:1, [T_CITY]:1 };
-const TERRAIN_NAME = { [T_PLAIN]:'Ebene', [T_FOREST]:'Wald', [T_HILLS]:'Hügel', [T_MOUNTAIN]:'Gebirge', [T_WATER]:'Wasser', [T_CITY]:'Stadt' };
 
+/* ---------- KONSTANTEN: SPIELER ---------- */
 const OWNER_PLAYER = 'player';
-const OWNER_AI = 'ai';
 const OWNER_NEUTRAL = 'neutral';
+const AI_OWNER_POOL = ['ai1','ai2','ai3','ai4'];
+const OWNER_LABEL = { player:'Du', ai1:'KI 1', ai2:'KI 2', ai3:'KI 3', ai4:'KI 4', neutral:'Neutral' };
+const OWNER_COLORS = {
+  player: '#3fa9f5',
+  ai1:    '#f5473f',
+  ai2:    '#f5a63f',
+  ai3:    '#b06bf0',
+  ai4:    '#3ff0a6',
+  neutral:'#8a8f9a'
+};
 
+let aiOwners = ['ai1'];       // je nach Gegneranzahl gesetzt
+let turnOrder = [OWNER_PLAYER, 'ai1'];
+let turnIndex = 0;
+
+/* ---------- KONSTANTEN: EINHEITEN ---------- */
 const EFFECTIVENESS = ['fresh','rested','ready','used','tired','exhausted'];
 const EFFECTIVENESS_NAME = { fresh:'Frisch', rested:'Ausgeruht', ready:'Bereit', used:'Beansprucht', tired:'Müde', exhausted:'Erschöpft' };
 const EXPERIENCE = ['green','proven','hardened'];
 const EXPERIENCE_NAME = { green:'Grün', proven:'Erprobt', hardened:'Abgehärtet' };
-const EXPERIENCE_CAP = { green:2, proven:1, hardened:0 }; // Index in EFFECTIVENESS, das maximal erreichbar ist
+const EXPERIENCE_CAP = { green:2, proven:1, hardened:0 };
 const EXPERIENCE_WINS_NEEDED = { proven:3, hardened:6 };
 
+// power/defense = Trefferchance-Faktoren, dmg = Schaden/Treffer, hp = Trefferpunkte.
 // Werte grob am Original "Empire" orientiert (eigene, angepasste Balance).
-// power/defense sind Wahrscheinlichkeits-Faktoren (Trefferchance je
-// Kampfrunde), dmg ist der Schaden pro Treffer, hp die Trefferpunkte.
 const UNIT_STATS = {
-  infantry:   { name:'Infanterie', label:'I', category:'ground', subclass:'land', move:3, dmg:1, power:50, defense:50, hp:3, cost:10, range:0, canDigIn:true },
-  tank:       { name:'Panzer',     label:'T', category:'ground', subclass:'land', move:6, dmg:2, power:65, defense:55, hp:5, cost:20, range:0, canDigIn:true, captureMorph:'infantry' },
-  artillery:  { name:'Artillerie', label:'A', category:'ground', subclass:'land', move:3, dmg:2, power:55, defense:35, hp:3, cost:18, range:2, canDigIn:true, canDefensiveFire:true },
-  destroyer:  { name:'Zerstörer',  label:'D', category:'ground', subclass:'sea',  move:6, dmg:2, power:60, defense:50, hp:6, cost:22, range:2, canDefensiveFire:true, portageCapacity:2, canCarry:['infantry','tank','artillery'] },
-  submarine:  { name:'U-Boot',     label:'U', category:'ground', subclass:'sea',  move:5, dmg:2, power:70, defense:30, hp:4, cost:24, range:0, canDive:true },
-  helicopter: { name:'Helikopter', label:'H', category:'air',    subclass:null,   move:6, dmg:1, power:50, defense:40, hp:3, cost:18, range:0, noMountain:true },
-  fighter:    { name:'Jäger',      label:'F', category:'air',    subclass:null,   move:10,dmg:1, power:60, defense:30, hp:2, cost:25, range:0, fuel:8, canBomb:true }
+  infantry:   { name:'Infanterie',    label:'I', category:'ground', subclass:'land', move:3,  dmg:1, power:50, defense:50, hp:3,  cost:10, range:0, canDigIn:true },
+  tank:       { name:'Panzer',        label:'T', category:'ground', subclass:'land', move:6,  dmg:2, power:65, defense:55, hp:5,  cost:20, range:0, canDigIn:true, captureMorph:'infantry' },
+  artillery:  { name:'Artillerie',    label:'A', category:'ground', subclass:'land', move:3,  dmg:2, power:55, defense:35, hp:3,  cost:18, range:2, canDigIn:true, canDefensiveFire:true },
+  destroyer:  { name:'Zerstörer',     label:'D', category:'ground', subclass:'sea',  move:6,  dmg:2, power:60, defense:50, hp:6,  cost:22, range:1, canDefensiveFire:true, portageCapacity:1, canCarry:['infantry','artillery'] },
+  transport:  { name:'Transportschiff', label:'X', category:'ground', subclass:'sea', move:5, dmg:1, power:25, defense:30, hp:5,  cost:22, range:0, portageCapacity:4, canCarry:['infantry','tank','artillery'] },
+  battleship: { name:'Schlachtschiff', label:'B', category:'ground', subclass:'sea', move:5,  dmg:4, power:70, defense:65, hp:12, cost:46, range:2, canDefensiveFire:true },
+  carrier:    { name:'Träger',        label:'C', category:'ground', subclass:'sea',  move:5,  dmg:1, power:35, defense:50, hp:9,  cost:42, range:0, portageCapacity:3, canCarry:['fighter','helicopter'] },
+  submarine:  { name:'U-Boot',        label:'U', category:'ground', subclass:'sea',  move:5,  dmg:2, power:70, defense:30, hp:4,  cost:24, range:0, canDive:true },
+  helicopter: { name:'Helikopter',    label:'H', category:'air',    subclass:null,   move:6,  dmg:1, power:50, defense:40, hp:3,  cost:18, range:0, noMountain:true },
+  fighter:    { name:'Jäger',         label:'F', category:'air',    subclass:null,   move:10, dmg:1, power:60, defense:30, hp:2,  cost:25, range:0, fuel:8 }
 };
-const BUILD_ORDER = ['infantry','tank','artillery','destroyer','submarine','helicopter','fighter'];
+const BUILD_ORDER = ['infantry','tank','artillery','destroyer','transport','battleship','carrier','submarine','helicopter','fighter'];
 
 const CITY_PRODUCTION = 3;
 const CAPITAL_PRODUCTION = 5;
@@ -153,18 +155,22 @@ const LEVEL_TARGETS = {
 
 /* ---------- SPIELZUSTAND ---------- */
 let map = [];
+let landmassId = [];        // -1 = Wasser, sonst Landmassen-Index (für KI-Transportlogik)
 let units = [];
 let unitIdCounter = 1;
 let currentTurnOwner = OWNER_PLAYER;
 let turnNumber = 1;
 let selectedUnit = null;
 let reachableTiles = [];
+let reachDist = {};
 let attackableTiles = [];
 let rangedTiles = [];
 let unloadTiles = [];
 let unloadingCargoUnit = null;
 let gameOver = false;
 let selectedBuildCity = null;
+let awaitingWaypointClick = false;
+let dragPreviewTarget = null;
 
 const camera = { x:0, y:0, zoom:1 };
 
@@ -222,105 +228,223 @@ function centerCameraOn(wx, wy){
   render();
 }
 
-/* ---------- KARTE GENERIEREN ---------- */
 function inBounds(x,y){ return x>=0 && x<COLS && y>=0 && y<ROWS; }
+function activeOwners(){ return [OWNER_PLAYER, ...aiOwners]; }
 
+/* ---------- KARTE GENERIEREN ---------- */
 function newTile(type){
   return { type, owner:null, buildPoints:0, buildType:'infantry', capital:false, road:false };
 }
 
-function generateMap(){
-  map = [];
+function rollTerrain(){
+  const r = Math.random();
+  if(r<0.08) return T_MOUNTAIN;
+  if(r<0.18) return T_FOREST;
+  if(r<0.28) return T_HILLS;
+  return T_PLAIN;
+}
+
+function generateBaseGrid(fillType){
+  const grid = [];
   for(let y=0;y<ROWS;y++){
     const row = [];
+    for(let x=0;x<COLS;x++) row.push(newTile(fillType===T_WATER ? T_WATER : rollTerrain()));
+    grid.push(row);
+  }
+  return grid;
+}
+
+// Kontinent: eine große Landmasse, Rand + ein paar Buchten werden zu Wasser.
+function carveContinentCoastline(){
+  const border = Math.max(2, Math.round(Math.min(COLS,ROWS)*0.05));
+  for(let y=0;y<ROWS;y++){
     for(let x=0;x<COLS;x++){
-      const r = Math.random();
-      let type = T_PLAIN;
-      if(r < 0.08) type = T_MOUNTAIN;
-      else if(r < 0.18) type = T_FOREST;
-      else if(r < 0.28) type = T_HILLS;
-      row.push(newTile(type));
-    }
-    map.push(row);
-  }
-
-  // See(n): Anzahl & Größe richten sich nach den Kartenoptionen. "Trocken" erzeugt
-  // gar kein Wasser (reine Landkarte, Küsten-Einheiten dann nicht baubar).
-  const waterLevel = WATER_LEVEL[mapConfig.water] !== undefined ? WATER_LEVEL[mapConfig.water] : 1;
-  const lakeCount = waterLevel;
-  const stepsPerLake = Math.round(COLS*ROWS * (waterLevel===2 ? 0.11 : 0.08));
-  for(let L=0; L<lakeCount; L++){
-    let lx = 4 + Math.floor(Math.random()*Math.max(1,COLS-8));
-    let ly = 4 + Math.floor(Math.random()*Math.max(1,ROWS-8));
-    for(let i=0;i<stepsPerLake;i++){
-      if(inBounds(lx,ly)) map[ly][lx].type = T_WATER;
-      const dir = DIRS8[Math.floor(Math.random()*4)]; // nur orthogonal für kompaktere Form
-      lx = Math.min(COLS-4, Math.max(3, lx+dir[0]));
-      ly = Math.min(ROWS-4, Math.max(3, ly+dir[1]));
+      const distEdge = Math.min(x, y, COLS-1-x, ROWS-1-y);
+      if(distEdge < border) map[y][x].type = T_WATER;
     }
   }
-
-  // Nur Gebirge um eine Stadt herum einebnen (sonst könnte sie eingeschlossen sein) —
-  // Wasser bewusst NICHT anfassen, sonst können Städte nie an der Küste liegen.
-  const clearArea = (cx, cy) => {
-    for(let dy=-1; dy<=1; dy++){
-      for(let dx=-1; dx<=1; dx++){
-        const x=cx+dx, y=cy+dy;
-        if(inBounds(x,y) && map[y][x].type===T_MOUNTAIN) map[y][x].type = T_PLAIN;
-      }
+  const bays = Math.round((COLS*ROWS)/900) + 3;
+  for(let i=0;i<bays;i++){
+    const edge = Math.floor(Math.random()*4);
+    let x,y;
+    if(edge===0){ x=border; y=2+Math.floor(Math.random()*Math.max(1,ROWS-4)); }
+    else if(edge===1){ x=COLS-1-border; y=2+Math.floor(Math.random()*Math.max(1,ROWS-4)); }
+    else if(edge===2){ x=2+Math.floor(Math.random()*Math.max(1,COLS-4)); y=border; }
+    else { x=2+Math.floor(Math.random()*Math.max(1,COLS-4)); y=ROWS-1-border; }
+    const len = 5 + Math.floor(Math.random() * Math.min(COLS,ROWS) * 0.18);
+    for(let s=0;s<len;s++){
+      if(inBounds(x,y)) map[y][x].type = T_WATER;
+      const dir = DIRS4[Math.floor(Math.random()*4)];
+      x = Math.min(COLS-2, Math.max(1, x+dir[0]));
+      y = Math.min(ROWS-2, Math.max(1, y+dir[1]));
     }
-  };
+  }
+}
 
-  const playerCap = {x:1, y:1};
-  const aiCap = {x:COLS-2, y:ROWS-2};
-  clearArea(playerCap.x, playerCap.y);
-  clearArea(aiCap.x, aiCap.y);
-  map[playerCap.y][playerCap.x] = Object.assign(newTile(T_CITY), { owner: OWNER_PLAYER, capital:true });
-  map[aiCap.y][aiCap.x] = Object.assign(newTile(T_CITY), { owner: OWNER_AI, capital:true });
-
-  const cityList = [{x:playerCap.x,y:playerCap.y}, {x:aiCap.x,y:aiCap.y}];
-  const tilesPerCity = CITY_TILES_PER_CITY[mapConfig.cities] !== undefined ? CITY_TILES_PER_CITY[mapConfig.cities] : 44;
-  const neutralCount = Math.max(4, Math.min(40, Math.round((COLS*ROWS) / tilesPerCity)));
-  let placed = 0, attempts = 0;
-  while(placed < neutralCount && attempts < 2000){
+// Inseln: alles Wasser, dann N Landmassen wachsen lassen (eine pro Spieler + Extras).
+function carveIslands(totalPlayers){
+  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++) map[y][x].type = T_WATER;
+  const extra = mapConfig.cities==='dense' ? 5 : (mapConfig.cities==='sparse' ? 1 : 3);
+  const islandCount = totalPlayers + extra;
+  const minSep = Math.max(6, Math.round(Math.min(COLS,ROWS) / (Math.sqrt(islandCount)+0.5)));
+  // Wachstum je Insel wird auf einen Radius um ihr Zentrum begrenzt, sonst verschmelzen
+  // benachbarte Inseln durch einen unbegrenzten Random-Walk zu einer Landmasse.
+  const maxRadius = Math.max(3, Math.round(minSep*0.4));
+  const margin = maxRadius+2;
+  const centers = [];
+  let attempts = 0;
+  while(centers.length < islandCount && attempts < 4000){
     attempts++;
-    const x = 2 + Math.floor(Math.random() * (COLS-4));
-    const y = 2 + Math.floor(Math.random() * (ROWS-4));
+    const cx = margin + Math.floor(Math.random()*Math.max(1,COLS-2*margin));
+    const cy = margin + Math.floor(Math.random()*Math.max(1,ROWS-2*margin));
+    if(centers.some(c => Math.hypot(c.x-cx, c.y-cy) < minSep)) continue;
+    centers.push({x:cx, y:cy});
+  }
+  const stepsPerIsland = Math.round(maxRadius*maxRadius*2.4);
+  for(const c of centers){
+    let x = c.x, y = c.y;
+    for(let s=0; s<stepsPerIsland; s++){
+      if(inBounds(x,y)) map[y][x].type = rollTerrain();
+      let dir = DIRS8[Math.floor(Math.random()*8)];
+      let nx = x+dir[0], ny = y+dir[1];
+      if(Math.hypot(nx-c.x, ny-c.y) > maxRadius){
+        dir = [Math.sign(c.x-x), Math.sign(c.y-y)];
+        if(dir[0]===0 && dir[1]===0) dir = DIRS8[Math.floor(Math.random()*8)];
+        nx = x+dir[0]; ny = y+dir[1];
+      }
+      x = Math.min(COLS-2, Math.max(1, nx));
+      y = Math.min(ROWS-2, Math.max(1, ny));
+    }
+  }
+  return centers;
+}
+
+// Verbundene Landmassen ermitteln (8-Richtungen) — Basis für Insel-Hauptstadtverteilung
+// und die KI-Transportlogik ("gehört Ziel X zur selben Landmasse wie Einheit Y?").
+function computeLandmasses(){
+  const id = [];
+  for(let y=0;y<ROWS;y++) id.push(new Array(COLS).fill(-1));
+  const components = [];
+  for(let y=0;y<ROWS;y++){
+    for(let x=0;x<COLS;x++){
+      if(map[y][x].type===T_WATER || id[y][x]!==-1) continue;
+      const compId = components.length;
+      const tiles = [];
+      const queue = [{x,y}];
+      id[y][x] = compId;
+      while(queue.length){
+        const cur = queue.shift();
+        tiles.push(cur);
+        for(const [dx,dy] of DIRS8){
+          const nx=cur.x+dx, ny=cur.y+dy;
+          if(!inBounds(nx,ny) || map[ny][nx].type===T_WATER || id[ny][nx]!==-1) continue;
+          id[ny][nx] = compId;
+          queue.push({x:nx,y:ny});
+        }
+      }
+      components.push(tiles);
+    }
+  }
+  return { id, components };
+}
+
+function isCoastal(x,y){
+  return DIRS4.some(([dx,dy]) => {
+    const nx=x+dx, ny=y+dy;
+    return inBounds(nx,ny) && map[ny][nx].type===T_WATER;
+  });
+}
+
+function clearMountainsAround(cx, cy){
+  for(let dy=-1; dy<=1; dy++){
+    for(let dx=-1; dx<=1; dx++){
+      const x=cx+dx, y=cy+dy;
+      if(inBounds(x,y) && map[y][x].type===T_MOUNTAIN) map[y][x].type = T_PLAIN;
+    }
+  }
+}
+
+function buildRoadPath(a, b){
+  let x = a.x, y = a.y;
+  const markRoad = (px,py) => { if(inBounds(px,py) && map[py][px].type!==T_WATER) map[py][px].road = true; };
+  markRoad(x,y);
+  while(x !== b.x){ x += x < b.x ? 1 : -1; markRoad(x,y); }
+  while(y !== b.y){ y += y < b.y ? 1 : -1; markRoad(x,y); }
+}
+
+function generateMap(){
+  const totalPlayers = 1 + aiOwners.length;
+  map = generateBaseGrid(T_PLAIN);
+
+  if(mapConfig.landform === 'islands'){
+    carveIslands(totalPlayers);
+  } else {
+    carveContinentCoastline();
+  }
+
+  const { components } = computeLandmasses();
+  components.sort((a,b) => b.length - a.length);
+
+  // Hauptstadt-Plätze: größte Landmassen zuerst, je Landmasse den Punkt mit größtem
+  // Mindestabstand zu bereits gewählten Hauptstädten (verteilt sie gut).
+  const capitalSpots = [];
+  for(let i=0; i<totalPlayers; i++){
+    const comp = components.length ? components[i % components.length] : null;
+    if(!comp || comp.length===0){ capitalSpots.push({x:1,y:1}); continue; }
+    let best=null, bestScore=-1;
+    for(const t of comp){
+      let minDist = Infinity;
+      for(const s of capitalSpots) minDist = Math.min(minDist, Math.abs(s.x-t.x)+Math.abs(s.y-t.y));
+      const score = capitalSpots.length===0 ? (Math.abs(t.x-COLS/2)+Math.abs(t.y-ROWS/2)) : minDist;
+      if(score > bestScore){ bestScore = score; best = t; }
+    }
+    capitalSpots.push(best || comp[Math.floor(comp.length/2)]);
+  }
+
+  const owners = activeOwners();
+  const cityList = [];
+  for(let i=0;i<totalPlayers;i++){
+    const spot = capitalSpots[i];
+    clearMountainsAround(spot.x, spot.y);
+    map[spot.y][spot.x] = Object.assign(newTile(T_CITY), { owner: owners[i], capital:true });
+    cityList.push({x:spot.x, y:spot.y});
+  }
+
+  const tilesPerCity = CITY_TILES_PER_CITY[mapConfig.cities] !== undefined ? CITY_TILES_PER_CITY[mapConfig.cities] : 44;
+  const neutralCount = Math.max(4, Math.min(60, Math.round((COLS*ROWS) / tilesPerCity)));
+  let placed = 0, attempts = 0;
+  while(placed < neutralCount && attempts < 4000){
+    attempts++;
+    const x = 2 + Math.floor(Math.random() * Math.max(1,COLS-4));
+    const y = 2 + Math.floor(Math.random() * Math.max(1,ROWS-4));
     if(map[y][x].type === T_WATER) continue;
-    const distP = Math.abs(x-playerCap.x) + Math.abs(y-playerCap.y);
-    const distA = Math.abs(x-aiCap.x) + Math.abs(y-aiCap.y);
-    if(distP < 4 || distA < 4) continue;
     let tooClose = false;
-    for(const c of cityList) if(Math.abs(c.x-x)+Math.abs(c.y-y) < 3) tooClose = true;
+    for(const c of cityList) if(Math.abs(c.x-x)+Math.abs(c.y-y) < 4) tooClose = true;
     if(tooClose) continue;
-    clearArea(x,y);
+    clearMountainsAround(x,y);
     map[y][x] = Object.assign(newTile(T_CITY), { owner: OWNER_NEUTRAL });
     cityList.push({x,y});
     placed++;
   }
 
-  // Garantie: Wenn Wasser existiert, aber (Zufallspech) keine einzige Stadt daran liegt,
-  // eine zusätzliche Küstenstadt erzwingen — sonst sind Zerstörer/U-Boote nirgends baubar.
-  if(lakeCount > 0 && !cityList.some(c => isCoastal(c.x,c.y))){
-    let bestSpot = null, bestScore = Infinity, coastAttempts = 0;
-    while(coastAttempts < 400){
-      coastAttempts++;
-      const x = 2 + Math.floor(Math.random() * (COLS-4));
-      const y = 2 + Math.floor(Math.random() * (ROWS-4));
-      if(map[y][x].type === T_WATER || map[y][x].type === T_CITY) continue;
-      if(!isCoastal(x,y)) continue;
-      const distP = Math.abs(x-playerCap.x) + Math.abs(y-playerCap.y);
-      const distA = Math.abs(x-aiCap.x) + Math.abs(y-aiCap.y);
-      if(distP < 4 || distA < 4) continue;
-      let tooClose = false;
-      for(const c of cityList) if(Math.abs(c.x-x)+Math.abs(c.y-y) < 3) tooClose = true;
+  // Garantie: Wenn Wasser existiert, aber zufällig keine Stadt daran liegt, eine
+  // zusätzliche Küstenstadt erzwingen (sonst sind Seeeinheiten nirgends baubar).
+  const hasWater = cityList.length>0 && (mapConfig.landform==='islands' || true) &&
+    (() => { for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++) if(map[y][x].type===T_WATER) return true; return false; })();
+  if(hasWater && !cityList.some(c => isCoastal(c.x,c.y))){
+    let bestSpot=null, attempts2=0;
+    while(!bestSpot && attempts2<600){
+      attempts2++;
+      const x = 2 + Math.floor(Math.random()*Math.max(1,COLS-4));
+      const y = 2 + Math.floor(Math.random()*Math.max(1,ROWS-4));
+      if(map[y][x].type===T_WATER || map[y][x].type===T_CITY || !isCoastal(x,y)) continue;
+      let tooClose=false;
+      for(const c of cityList) if(Math.abs(c.x-x)+Math.abs(c.y-y)<3) tooClose=true;
       if(tooClose) continue;
-      const score = Math.random();
-      if(score < bestScore){ bestScore = score; bestSpot = {x,y}; }
-      if(bestSpot) break;
+      bestSpot = {x,y};
     }
     if(bestSpot){
-      clearArea(bestSpot.x, bestSpot.y);
+      clearMountainsAround(bestSpot.x, bestSpot.y);
       map[bestSpot.y][bestSpot.x] = Object.assign(newTile(T_CITY), { owner: OWNER_NEUTRAL });
       cityList.push(bestSpot);
     }
@@ -328,49 +452,39 @@ function generateMap(){
 
   // Straßennetz: jede Stadt mit ihrer nächsten Nachbarstadt verbinden (nur über Land)
   for(const c of cityList){
-    let nearest = null, bestD = Infinity;
+    let nearest=null, bestD=Infinity;
     for(const o of cityList){
       if(o===c) continue;
       const d = Math.abs(o.x-c.x)+Math.abs(o.y-c.y);
-      if(d < bestD){ bestD = d; nearest = o; }
+      if(d<bestD){ bestD=d; nearest=o; }
     }
     if(nearest) buildRoadPath(c, nearest);
   }
 
-  return { playerCap, aiCap };
+  landmassId = computeLandmasses().id;
+
+  return { capitalSpots, owners };
 }
 
-function buildRoadPath(a, b){
-  let x = a.x, y = a.y;
-  const markRoad = (px,py) => { if(inBounds(px,py) && map[py][px].type!==T_WATER) map[py][px].road = true; };
-  markRoad(x,y);
-  while(x !== b.x){
-    x += x < b.x ? 1 : -1;
-    markRoad(x,y);
-  }
-  while(y !== b.y){
-    y += y < b.y ? 1 : -1;
-    markRoad(x,y);
-  }
-}
-
-/* ---------- EINHEITEN ---------- */
+/* ---------- EINHEITEN: GRUNDFUNKTIONEN ---------- */
 function spawnUnit(owner, type, x, y){
   const stats = UNIT_STATS[type];
   const u = {
     id: unitIdCounter++,
-    owner, type,
-    x, y,
+    owner, type, x, y,
     hp: stats.hp,
+    movesLeft: stats.move,
     moved: false,
     firedThisTurn: false,
     actedAtAll: false,
     foughtThisTurn: false,
     fuel: stats.fuel !== undefined ? stats.fuel : null,
     dugIn: false,
-    digPending: null, // 'in' | 'out' | null
+    digPending: null,
     subLevel: stats.subclass==='sea' && type==='submarine' ? 'surface' : null,
-    effectiveness: EXPERIENCE_CAP.green, // Index in EFFECTIVENESS ('ready')
+    orderState: null,          // null | 'resting' | 'waiting'
+    destination: null,         // {x,y} Wegpunkt-Marschziel
+    effectiveness: EXPERIENCE_CAP.green,
     experience: 'green',
     xpWins: 0,
     hostId: null,
@@ -380,15 +494,9 @@ function spawnUnit(owner, type, x, y){
   return u;
 }
 
-function unitsAt(x,y){
-  return units.filter(u => u.x===x && u.y===y && u.hp>0 && !u.hostId);
-}
-function unitAtLevel(x,y,level){
-  return units.find(u => u.x===x && u.y===y && u.hp>0 && !u.hostId && getLevel(u)===level);
-}
-function unitsOf(owner){
-  return units.filter(u => u.owner===owner && u.hp>0 && !u.hostId);
-}
+function unitsAt(x,y){ return units.filter(u => u.x===x && u.y===y && u.hp>0 && !u.hostId); }
+function unitsOf(owner){ return units.filter(u => u.owner===owner && u.hp>0 && !u.hostId); }
+function allUnitsOf(owner){ return units.filter(u => u.owner===owner && u.hp>0); }
 function citiesOf(owner){
   const list = [];
   for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++)
@@ -406,17 +514,10 @@ function getLevel(u){
 }
 function effName(u){ return EFFECTIVENESS_NAME[EFFECTIVENESS[u.effectiveness]]; }
 function isCrippled(u){ return u.hp <= UNIT_STATS[u.type].hp/2; }
+function isEliminated(owner){ return citiesOf(owner).length===0 && allUnitsOf(owner).length===0; }
+function ownerLabel(owner){ return OWNER_LABEL[owner] || owner; }
 
 /* ---------- TERRAIN / BEWEGUNG ---------- */
-// Küstenstadt = mind. ein orthogonal angrenzendes Wasserfeld (nur See-/U-Boot-Einheiten
-// dürfen dort produziert werden).
-function isCoastal(x,y){
-  return [[1,0],[-1,0],[0,1],[0,-1]].some(([dx,dy]) => {
-    const nx=x+dx, ny=y+dy;
-    return inBounds(nx,ny) && map[ny][nx].type===T_WATER;
-  });
-}
-
 function terrainAllowed(tile, unit){
   const s = UNIT_STATS[unit.type];
   if(s.category==='air'){
@@ -425,7 +526,6 @@ function terrainAllowed(tile, unit){
   }
   if(unit.subLevel==='deep') return tile.type===T_WATER;
   if(s.subclass==='sea') return tile.type===T_WATER || tile.type===T_CITY;
-  // land
   return tile.type !== T_WATER;
 }
 
@@ -436,17 +536,17 @@ function terrainCost(tile, unit){
   return MOVE_COST[tile.type];
 }
 
-// Ausnahme "kann ansonsten unpassierbares Terrain betreten, um an Bord zu gehen"
+// Ausnahme "kann sonst unpassierbares Feld betreten, um an Bord zu gehen":
+// Landeinheiten -> Schiffe mit canCarry; Lufteinheiten -> Träger mit canCarry.
 function findLoadHost(unit, x, y){
   const s = UNIT_STATS[unit.type];
-  if(s.subclass !== 'land') return null;
+  if(s.subclass === 'sea') return null; // Schiffe werden nie selbst transportiert
   const host = units.find(o => o.x===x && o.y===y && o.hp>0 && !o.hostId && o.owner===unit.owner &&
-    UNIT_STATS[o.type].canCarry && UNIT_STATS[o.type].canCarry.includes(unit.type) && getLevel(o)==='ground');
+    UNIT_STATS[o.type].canCarry && UNIT_STATS[o.type].canCarry.includes(unit.type));
   if(host && host.cargo.length < UNIT_STATS[host.type].portageCapacity) return host;
   return null;
 }
 
-// Prüft, ob 'unit' das Ebenen-Slot von (x,y) betreten kann.
 // Rückgabe: true = frei, 'combat' = Gegner blockiert (Kampfziel), false = belegt/kein Platz
 function slotStatus(x,y,unit){
   const lvl = getLevel(unit);
@@ -460,8 +560,10 @@ function slotStatus(x,y,unit){
   return occupants.length < 1;
 }
 
+// Bewegungsreichweite für DIESE Runde (u.movesLeft als Budget, nicht der volle Basiswert —
+// dadurch kann eine Einheit über mehrere Klicks hinweg ihre Restpunkte weiter verbrauchen).
 function computeReachable(unit){
-  const stats = UNIT_STATS[unit.type];
+  const budget = unit.movesLeft;
   const dist = { [key(unit.x,unit.y)]: 0 };
   const frontier = [{x:unit.x,y:unit.y,d:0}];
   const result = [];
@@ -480,7 +582,7 @@ function computeReachable(unit){
         if(status !== true) continue;
       }
       const nd = cur.d + terrainCost(tile, unit);
-      if(nd > stats.move) continue;
+      if(nd > budget) continue;
       const k = key(nx,ny);
       if(dist[k] !== undefined && dist[k] <= nd) continue;
       dist[k] = nd;
@@ -493,8 +595,9 @@ function computeReachable(unit){
   return { tiles: final, dist };
 }
 
+// Vollständiger Pfad zu einem Ziel OHNE Rundenbudget-Deckel (für KI-Marsch über mehrere
+// Runden und für Spieler-Wegpunktbefehle). Gegner blockieren den Weg (außer als Zielfeld).
 function computePathTowards(unit, target){
-  const stats = UNIT_STATS[unit.type];
   const dist = { [key(unit.x,unit.y)]: 0 };
   const prev = {};
   const frontier = [{x:unit.x,y:unit.y,d:0}];
@@ -536,7 +639,7 @@ function computePathTowards(unit, target){
 
 /* ---------- KAMPF ---------- */
 function effDiff(defender, attacker){
-  return defender.effectiveness - attacker.effectiveness; // positiv = Verteidiger schlechter -> Angreifer im Vorteil
+  return defender.effectiveness - attacker.effectiveness;
 }
 
 function hitChance(attacker, defender, attackerCrippled){
@@ -557,13 +660,10 @@ function grantExperience(u){
 function destroyUnit(u){
   units = units.filter(x => x!==u);
   if(u.cargo){
-    for(const cid of u.cargo){
-      units = units.filter(x => x.id!==cid);
-    }
+    for(const cid of u.cargo) units = units.filter(x => x.id!==cid);
   }
 }
 
-// Nahkampf durch Bewegung (Kill/Capture Combat). Gibt {outcome, log} zurück.
 function resolveMeleeAttack(attacker, defender, noEntry){
   attacker.foughtThisTurn = true;
   defender.foughtThisTurn = true;
@@ -573,11 +673,8 @@ function resolveMeleeAttack(attacker, defender, noEntry){
     rounds++;
     const chance = hitChance(attacker, defender, attackerCrippled);
     const roll = Math.random()*100;
-    if(roll < chance){
-      defender.hp -= UNIT_STATS[attacker.type].dmg;
-    } else {
-      attacker.hp -= UNIT_STATS[defender.type].dmg;
-    }
+    if(roll < chance) defender.hp -= UNIT_STATS[attacker.type].dmg;
+    else attacker.hp -= UNIT_STATS[defender.type].dmg;
   }
   if(defender.hp <= 0){
     destroyUnit(defender);
@@ -590,10 +687,10 @@ function resolveMeleeAttack(attacker, defender, noEntry){
   }
 }
 
-// Fernkampf (Bombard/Range Kill): Angreifer nimmt nie Schaden, Serie endet beim ersten Fehlschuss.
 function resolveRangedAttack(attacker, defender){
   attacker.firedThisTurn = true;
   attacker.moved = true;
+  attacker.movesLeft = 0;
   attacker.actedAtAll = true;
   attacker.foughtThisTurn = true;
   const attackerCrippled = isCrippled(attacker);
@@ -601,12 +698,8 @@ function resolveRangedAttack(attacker, defender){
   while(defender.hp>0){
     const chance = hitChance(attacker, defender, attackerCrippled);
     const roll = Math.random()*100;
-    if(roll < chance){
-      defender.hp -= UNIT_STATS[attacker.type].dmg;
-      hitAny = true;
-    } else {
-      break;
-    }
+    if(roll < chance){ defender.hp -= UNIT_STATS[attacker.type].dmg; hitAny = true; }
+    else break;
   }
   if(defender.hp<=0){
     destroyUnit(defender);
@@ -625,23 +718,25 @@ function captureCity(x,y, owner, capturingUnit){
   tile.buildType = 'infantry';
   const stats = UNIT_STATS[capturingUnit.type];
   if(stats.captureMorph && capturingUnit.hp >= stats.hp){
-    // Panzer, der eine Stadt bei voller Stärke erobert, wird zu Infanterie "verbraucht"
     destroyUnit(capturingUnit);
     spawnUnit(owner, stats.captureMorph, x, y);
   }
 }
 
-/* ---------- BILD: WER DARF WEN ANGREIFEN ---------- */
+function refuelIfOnOwnCity(u){
+  if(u.type !== 'fighter') return;
+  const tile = map[u.y][u.x];
+  if(tile.type===T_CITY && tile.owner===u.owner) u.fuel = UNIT_STATS.fighter.fuel;
+}
+
+/* ---------- WER DARF WEN ANGREIFEN (Welt-Ebenen-Priorität) ---------- */
 function pickDefenderAt(x,y, attacker){
   const attackerLevel = getLevel(attacker);
   const allowedLevels = LEVEL_TARGETS[attackerLevel];
   const occupantsByLevel = { air:null, ground:null, sub:null };
   for(const u of units){
-    if(u.x===x && u.y===y && u.hp>0 && !u.hostId){
-      occupantsByLevel[getLevel(u)] = u;
-    }
+    if(u.x===x && u.y===y && u.hp>0 && !u.hostId) occupantsByLevel[getLevel(u)] = u;
   }
-  // Luftpriorität: wenn ein feindliches Luftziel da ist und angreifbar, muss dieses zuerst bekämpft werden
   if(occupantsByLevel.air && occupantsByLevel.air.owner!==attacker.owner && allowedLevels.includes('air')){
     return { target: occupantsByLevel.air, noEntry: true };
   }
@@ -654,23 +749,86 @@ function pickDefenderAt(x,y, attacker){
   return null;
 }
 
+/* ---------- WEGPUNKT-MARSCHBEFEHLE ---------- */
+// Setzt/validiert ein mehrrundiges Marschziel. Gibt true zurück, wenn angenommen.
+function setDestination(unit, x, y){
+  if(x===unit.x && y===unit.y){ unit.destination = null; return true; }
+  const path = computePathTowards(unit, {x,y});
+  if(!path){
+    updateInfoPanel('Zielpunkt ist auf diesem Weg nicht erreichbar.');
+    return false;
+  }
+  unit.destination = {x,y};
+  unit.orderState = null;
+  updateInfoPanel(`Marschziel gesetzt (${path.length} Feld(er) Weg) — Einheit bewegt sich über mehrere Runden selbständig dorthin.`);
+  return true;
+}
+
+// Führt den Automarsch einer Einheit für die aktuelle Runde aus (bis Budget verbraucht,
+// Ziel erreicht oder Feindkontakt). Bricht bei Feindkontakt ab und gibt der Einheit die
+// Kontrolle zurück, statt automatisch anzugreifen.
+function advanceWaypoint(unit){
+  if(!unit.destination || unit.moved || unit.hp<=0) return;
+  const stats = UNIT_STATS[unit.type];
+  let guard = 0;
+  while(unit.destination && unit.movesLeft>0 && guard<50){
+    guard++;
+    if(unit.x===unit.destination.x && unit.y===unit.destination.y){ unit.destination=null; break; }
+    const path = computePathTowards(unit, unit.destination);
+    if(!path || path.length===0){
+      updateInfoPanel(`${ownerLabel(unit.owner)}: Marschbefehl abgebrochen — kein Weg zum Ziel.`);
+      unit.destination = null;
+      break;
+    }
+    const step = path[0];
+    const def = pickDefenderAt(step.x, step.y, unit);
+    if(def){
+      updateInfoPanel(`${ownerLabel(unit.owner)}: Einheit hat Feindkontakt — Marschbefehl unterbrochen.`);
+      unit.destination = null;
+      break;
+    }
+    const cost = terrainCost(map[step.y][step.x], unit);
+    if(cost > unit.movesLeft) break;
+    unit.movesLeft -= cost;
+    unit.x = step.x; unit.y = step.y;
+    unit.actedAtAll = true;
+    refuelIfOnOwnCity(unit);
+    const tile = map[step.y][step.x];
+    if(tile.type===T_CITY && tile.owner!==unit.owner && stats.subclass==='land'){
+      captureCity(step.x, step.y, unit.owner, unit);
+    }
+    // Adjazenter Feind nach dem Schritt -> ebenfalls abbrechen (Feindkontakt)
+    if(adjacentTiles(unit.x,unit.y).some(t => pickDefenderAt(t.x,t.y,unit))){
+      unit.destination = null;
+      break;
+    }
+  }
+  if(unit.movesLeft<=0) unit.moved = true;
+}
+
 /* ---------- SPIELERZUG: AUSWAHL & HIGHLIGHTS ---------- */
 function selectUnit(u){
+  if(u.orderState){
+    u.orderState = null;
+    u.moved = false;
+    const s = UNIT_STATS[u.type];
+    u.movesLeft = isCrippled(u) ? Math.max(1, Math.floor(s.move/2)) : s.move;
+  }
   selectedUnit = u;
   closeBuildPanel();
   unloadingCargoUnit = null;
-  const reach = u.dugIn ? { tiles: [], dist: { [key(u.x,u.y)]: 0 } } : computeReachable(u);
+  const reach = (u.dugIn || u.movesLeft<=0) ? { tiles: [], dist: { [key(u.x,u.y)]: 0 } } : computeReachable(u);
   reachableTiles = reach.tiles;
+  reachDist = reach.dist;
   attackableTiles = [];
   rangedTiles = [];
   unloadTiles = [];
   const stats = UNIT_STATS[u.type];
-  const attackerLevel = getLevel(u);
 
-  // Angriffsziele: jedes Feld, das von IRGENDEINER innerhalb der Bewegungsreichweite
-  // erreichbaren Position aus angrenzt (nicht nur von der Startposition) — ein Panzer
-  // mit Bewegung 6 kann sich also 5 Felder nähern und im selben Zug noch angreifen.
-  const origins = [{x:u.x,y:u.y,d:0}, ...reachableTiles.map(t=>({x:t.x,y:t.y,d:reach.dist[key(t.x,t.y)]}))];
+  // Angriffsziele: von JEDER innerhalb der Restreichweite erreichbaren Position aus,
+  // nicht nur von der Startposition — so kann sich eine Einheit nähern und im selben
+  // Zug noch zuschlagen.
+  const origins = [{x:u.x,y:u.y,d:0}, ...reachableTiles.map(t=>({x:t.x,y:t.y,d:reachDist[key(t.x,t.y)]}))];
   const seenAttack = new Set();
   for(const o of origins){
     for(const t of adjacentTiles(o.x,o.y)){
@@ -679,7 +837,7 @@ function selectUnit(u){
       const def = pickDefenderAt(t.x,t.y,u);
       if(def){
         const entryCost = o.d + terrainCost(map[t.y][t.x], u);
-        if(entryCost <= stats.move){ attackableTiles.push(t); seenAttack.add(tk); }
+        if(entryCost <= u.movesLeft){ attackableTiles.push(t); seenAttack.add(tk); }
         continue;
       }
       const tile = map[t.y][t.x];
@@ -691,7 +849,8 @@ function selectUnit(u){
     }
   }
 
-  if(stats.range > 0 && !u.moved){
+  // Fernkampf nur, wenn noch KEIN Bewegungspunkt verbraucht wurde (Originalregel).
+  if(stats.range > 0 && u.movesLeft===stats.move && !u.actedAtAll){
     for(let dy=-stats.range; dy<=stats.range; dy++){
       for(let dx=-stats.range; dx<=stats.range; dx++){
         if(dx===0 && dy===0) continue;
@@ -712,13 +871,14 @@ function selectUnit(u){
 function updateSelectionInfo(){
   if(!selectedUnit){ updateInfoPanel('Wähle eine Einheit aus, um sie zu bewegen oder anzugreifen.'); return; }
   const u = selectedUnit, s = UNIT_STATS[u.type];
-  let parts = [`${s.name} ausgewählt`, `HP ${u.hp}/${s.hp}`, effName(u), EXPERIENCE_NAME[u.experience]];
+  let parts = [`${s.name} ausgewählt`, `HP ${u.hp}/${s.hp}`, `Bew ${u.movesLeft}/${s.move}`, effName(u), EXPERIENCE_NAME[u.experience]];
   if(s.fuel !== undefined) parts.push(`Sprit ${u.fuel}/${s.fuel}`);
-  if(u.dugIn) parts.push('Eingegraben');
+  if(u.dugIn) parts.push('Befestigt');
   if(isCrippled(u)) parts.push('Angeschlagen');
   if(u.subLevel==='deep') parts.push('Getaucht');
   if(u.cargo && u.cargo.length) parts.push(`Fracht ${u.cargo.length}/${s.portageCapacity}`);
-  updateInfoPanel(parts.join(' | ') + '. Blau=Bewegen, Rot=Angriff/Erobern, Orange=Fernkampf.');
+  if(u.destination) parts.push('Marschbefehl aktiv');
+  updateInfoPanel(parts.join(' | ') + '. Blau=Bewegen, Rot=Angriff/Erobern, Orange=Fernkampf. [G]=Marschziel, [R]asten [W]arten [B]efestigen.');
 }
 
 function deselect(){
@@ -728,11 +888,12 @@ function deselect(){
   rangedTiles = [];
   unloadTiles = [];
   unloadingCargoUnit = null;
+  awaitingWaypointClick = false;
   renderUnitActions();
   render();
 }
 
-/* ---------- AKTIONSLEISTE (Eingraben, Fernkampf, Tauchen, Entladen) ---------- */
+/* ---------- AKTIONSLEISTE ---------- */
 function renderUnitActions(){
   const bar = document.getElementById('unit-actions');
   bar.innerHTML = '';
@@ -744,22 +905,25 @@ function renderUnitActions(){
     const b = document.createElement('button');
     b.className = 'unit-action-btn' + (toggled?' toggled':'');
     b.textContent = label;
-    b.addEventListener('click', onClick);
+    if(onClick) b.addEventListener('click', onClick);
     bar.appendChild(b);
   };
 
+  addBtn('🎯 Marschziel [G]', () => {
+    awaitingWaypointClick = true;
+    updateInfoPanel('Zielpunkt auf der Karte anklicken (auch außerhalb der Reichweite)...');
+  }, awaitingWaypointClick);
+
+  addBtn('💤 Rasten [R]', () => commandOrderState(u, 'resting'));
+  addBtn('⏸ Warten [W]', () => commandOrderState(u, 'waiting'));
+
   if(s.canDigIn && !u.dugIn && u.digPending!=='in'){
-    addBtn('⛏ Eingraben', () => {
-      u.digPending = 'in';
-      u.moved = true; u.actedAtAll = true;
-      updateInfoPanel('Gräbt sich ein — wird nächste Runde wirksam.');
-      deselect(); updateHud();
-    });
+    addBtn('⛏ Befestigen [B]', () => commandFortify(u));
   }
   if(u.dugIn){
     addBtn('⛏ Ausgraben', () => {
       u.digPending = 'out';
-      u.moved = true; u.actedAtAll = true;
+      u.moved = true; u.movesLeft = 0; u.actedAtAll = true;
       updateInfoPanel('Gräbt sich aus — nächste Runde wieder beweglich.');
       deselect(); updateHud();
     });
@@ -771,14 +935,14 @@ function renderUnitActions(){
     if(u.subLevel==='surface'){
       addBtn('🌊 Tauchen', () => {
         u.subLevel = 'deep';
-        u.moved = true; u.actedAtAll = true;
+        u.moved = true; u.movesLeft = 0; u.actedAtAll = true;
         updateInfoPanel('U-Boot taucht ab — nur noch von Boden-/U-Boot-Einheiten angreifbar.');
         deselect(); updateHud();
       });
     } else {
       addBtn('⬆ Auftauchen', () => {
         u.subLevel = 'surface';
-        u.moved = true; u.actedAtAll = true;
+        u.moved = true; u.movesLeft = 0; u.actedAtAll = true;
         updateInfoPanel('U-Boot taucht auf.');
         deselect(); updateHud();
       });
@@ -791,6 +955,20 @@ function renderUnitActions(){
       addBtn(`📦 Entladen: ${UNIT_STATS[cu.type].name}`, () => startUnload(u, cu));
     }
   }
+}
+
+function commandOrderState(u, state){
+  u.orderState = state;
+  u.moved = true; u.movesLeft = 0;
+  updateInfoPanel(`${UNIT_STATS[u.type].name} ${state==='resting' ? 'rastet' : 'wartet'} — bei Feindkontakt reaktiviert${state==='resting' ? ', heilt in Städten vollständig aus' : ''}.`);
+  deselect(); updateHud();
+}
+
+function commandFortify(u){
+  u.digPending = 'in';
+  u.moved = true; u.movesLeft = 0; u.actedAtAll = true;
+  updateInfoPanel('Gräbt sich ein — wird nächste Runde wirksam und bleibt auch bei Feindkontakt befestigt.');
+  deselect(); updateHud();
 }
 
 function startUnload(hostUnit, cargoUnit){
@@ -806,7 +984,7 @@ function startUnload(hostUnit, cargoUnit){
 }
 
 /* ---------- MAUS-STEUERUNG ---------- */
-let isDragging = false, dragMoved = false;
+let isDragging = false, dragMoved = false, unitDragMode = false;
 let dragStart = {x:0,y:0}, camStart = {x:0,y:0};
 const DRAG_THRESHOLD = 6;
 
@@ -816,6 +994,16 @@ gameCanvas.addEventListener('mousedown', (evt) => {
   dragMoved = false;
   dragStart = {x:evt.clientX, y:evt.clientY};
   camStart = {x:camera.x, y:camera.y};
+
+  unitDragMode = false;
+  if(selectedUnit && currentTurnOwner===OWNER_PLAYER && !selectedUnit.moved){
+    const rect = gameCanvas.getBoundingClientRect();
+    const sx = (evt.clientX - rect.left) * (gameCanvas.width/rect.width);
+    const sy = (evt.clientY - rect.top) * (gameCanvas.height/rect.height);
+    const world = screenToWorld(sx, sy);
+    const tx = Math.floor(world.x/BASE_TILE), ty = Math.floor(world.y/BASE_TILE);
+    if(tx===selectedUnit.x && ty===selectedUnit.y) unitDragMode = true;
+  }
 });
 
 window.addEventListener('mousemove', (evt) => {
@@ -823,7 +1011,16 @@ window.addEventListener('mousemove', (evt) => {
   const dx = evt.clientX - dragStart.x;
   const dy = evt.clientY - dragStart.y;
   if(Math.hypot(dx,dy) > DRAG_THRESHOLD) dragMoved = true;
-  if(dragMoved){
+  if(!dragMoved) return;
+
+  if(unitDragMode){
+    const rect = gameCanvas.getBoundingClientRect();
+    const sx = (evt.clientX - rect.left) * (gameCanvas.width/rect.width);
+    const sy = (evt.clientY - rect.top) * (gameCanvas.height/rect.height);
+    const world = screenToWorld(sx, sy);
+    dragPreviewTarget = { x: Math.floor(world.x/BASE_TILE), y: Math.floor(world.y/BASE_TILE) };
+    render();
+  } else {
     gameCanvas.classList.add('dragging');
     camera.x = camStart.x - dx / camera.zoom;
     camera.y = camStart.y - dy / camera.zoom;
@@ -836,13 +1033,33 @@ window.addEventListener('mouseup', (evt) => {
   if(!isDragging) return;
   isDragging = false;
   gameCanvas.classList.remove('dragging');
-  if(!dragMoved){
-    const rect = gameCanvas.getBoundingClientRect();
-    const sx = (evt.clientX - rect.left) * (gameCanvas.width/rect.width);
-    const sy = (evt.clientY - rect.top) * (gameCanvas.height/rect.height);
-    if(sx>=0 && sy>=0 && sx<=gameCanvas.width && sy<=gameCanvas.height){
-      handleGameClick(sx, sy);
+  const rect = gameCanvas.getBoundingClientRect();
+  const sx = (evt.clientX - rect.left) * (gameCanvas.width/rect.width);
+  const sy = (evt.clientY - rect.top) * (gameCanvas.height/rect.height);
+  const inCanvas = sx>=0 && sy>=0 && sx<=gameCanvas.width && sy<=gameCanvas.height;
+
+  if(unitDragMode && dragMoved && inCanvas && selectedUnit){
+    const world = screenToWorld(sx, sy);
+    const tx = Math.floor(world.x/BASE_TILE), ty = Math.floor(world.y/BASE_TILE);
+    dragPreviewTarget = null;
+    unitDragMode = false;
+    if(inBounds(tx,ty)){
+      if(reachableTiles.some(t=>t.x===tx && t.y===ty) || attackableTiles.some(t=>t.x===tx && t.y===ty)){
+        handleGameClick(sx, sy);
+      } else if(tx!==selectedUnit.x || ty!==selectedUnit.y){
+        setDestination(selectedUnit, tx, ty);
+        render();
+      }
     }
+    return;
+  }
+  unitDragMode = false;
+  dragPreviewTarget = null;
+
+  if(!dragMoved && inCanvas){
+    handleGameClick(sx, sy);
+  } else {
+    render();
   }
 });
 
@@ -865,13 +1082,28 @@ document.getElementById('home-btn').addEventListener('click', () => {
 
 window.addEventListener('keydown', (evt) => {
   if(document.getElementById('game-screen').classList.contains('hidden')) return;
+  const tag = (document.activeElement && document.activeElement.tagName) || '';
+  if(tag==='INPUT' || tag==='TEXTAREA') return;
   const panStep = 60 / camera.zoom;
-  if(evt.key==='ArrowLeft'){ camera.x -= panStep; clampCamera(); render(); }
-  else if(evt.key==='ArrowRight'){ camera.x += panStep; clampCamera(); render(); }
-  else if(evt.key==='ArrowUp'){ camera.y -= panStep; clampCamera(); render(); }
-  else if(evt.key==='ArrowDown'){ camera.y += panStep; clampCamera(); render(); }
-  else if(evt.key==='+' || evt.key==='='){ zoomAt(1.2, gameCanvas.width/2, gameCanvas.height/2); }
-  else if(evt.key==='-'){ zoomAt(1/1.2, gameCanvas.width/2, gameCanvas.height/2); }
+  const k = evt.key;
+
+  if(k===' ' || k==='Spacebar' || evt.code==='Space'){
+    evt.preventDefault();
+    endPlayerTurn();
+    return;
+  }
+  if(currentTurnOwner===OWNER_PLAYER && selectedUnit && !selectedUnit.moved){
+    if(k==='r' || k==='R'){ commandOrderState(selectedUnit, 'resting'); return; }
+    if(k==='w' || k==='W'){ commandOrderState(selectedUnit, 'waiting'); return; }
+    if((k==='b' || k==='B') && UNIT_STATS[selectedUnit.type].canDigIn && !selectedUnit.dugIn){ commandFortify(selectedUnit); return; }
+    if(k==='g' || k==='G'){ awaitingWaypointClick = true; updateInfoPanel('Zielpunkt auf der Karte anklicken...'); renderUnitActions(); return; }
+  }
+  if(k==='ArrowLeft'){ camera.x -= panStep; clampCamera(); render(); }
+  else if(k==='ArrowRight'){ camera.x += panStep; clampCamera(); render(); }
+  else if(k==='ArrowUp'){ camera.y -= panStep; clampCamera(); render(); }
+  else if(k==='ArrowDown'){ camera.y += panStep; clampCamera(); render(); }
+  else if(k==='+' || k==='='){ zoomAt(1.2, gameCanvas.width/2, gameCanvas.height/2); }
+  else if(k==='-'){ zoomAt(1/1.2, gameCanvas.width/2, gameCanvas.height/2); }
 });
 
 minimapCanvas.addEventListener('click', (evt) => {
@@ -891,13 +1123,22 @@ function handleGameClick(sx, sy){
   if(!inBounds(x,y)) return;
   if(currentTurnOwner !== OWNER_PLAYER) return;
 
-  // Entlade-Modus hat Vorrang
+  // Marschziel-Modus (Taste G oder Aktionsleiste) hat höchste Priorität
+  if(awaitingWaypointClick && selectedUnit){
+    awaitingWaypointClick = false;
+    setDestination(selectedUnit, x, y);
+    renderUnitActions();
+    render();
+    return;
+  }
+
+  // Entlade-Modus
   if(unloadingCargoUnit){
     if(unloadTiles.some(t=>t.x===x && t.y===y)){
       const { host, cargo } = unloadingCargoUnit;
       cargo.x = x; cargo.y = y;
       cargo.hostId = null;
-      cargo.moved = true; cargo.actedAtAll = true;
+      cargo.moved = true; cargo.movesLeft = 0; cargo.actedAtAll = true;
       host.cargo = host.cargo.filter(id=>id!==cargo.id);
       updateInfoPanel(`${UNIT_STATS[cargo.type].name} entladen.`);
       unloadingCargoUnit = null; unloadTiles = [];
@@ -927,7 +1168,6 @@ function handleGameClick(sx, sy){
   if(selectedUnit){
     const stats = UNIT_STATS[selectedUnit.type];
 
-    // Fernkampf
     if(rangedTiles.some(t=>t.x===x && t.y===y)){
       const def = pickDefenderAt(x,y,selectedUnit);
       if(def){
@@ -940,7 +1180,6 @@ function handleGameClick(sx, sy){
       }
     }
 
-    // Nahkampf / Erobern
     if(attackableTiles.some(t=>t.x===x && t.y===y)){
       const def = pickDefenderAt(x,y,selectedUnit);
       if(def){
@@ -957,35 +1196,37 @@ function handleGameClick(sx, sy){
           } else {
             updateInfoPanel('Luftziel zerstört — Feld bleibt umkämpft.');
           }
-          if(units.includes(selectedUnit)){ selectedUnit.moved = true; selectedUnit.actedAtAll = true; }
+          if(units.includes(selectedUnit)){ selectedUnit.moved = true; selectedUnit.movesLeft = 0; selectedUnit.actedAtAll = true; }
         } else {
           updateInfoPanel('Eigene Einheit im Kampf verloren!');
         }
       } else {
-        // leere Stadt erobern
         selectedUnit.x = x; selectedUnit.y = y;
         captureCity(x,y, selectedUnit.owner, selectedUnit);
         updateInfoPanel('Stadt erobert!');
-        if(units.includes(selectedUnit)){ selectedUnit.moved = true; selectedUnit.actedAtAll = true; }
+        if(units.includes(selectedUnit)){ selectedUnit.moved = true; selectedUnit.movesLeft = 0; selectedUnit.actedAtAll = true; }
       }
       deselect();
       checkGameOver(); updateHud();
       return;
     }
 
-    // Bewegen (inkl. Laden auf Zerstörer)
+    // Bewegen (inkl. Laden auf Schiff/Träger) — verbraucht nur die tatsächlichen
+    // Bewegungspunkte; bei Restpunkten bleibt die Einheit für weitere Klicks wählbar.
     if(reachableTiles.some(t=>t.x===x && t.y===y)){
       const hostAtDest = units.find(o => o.x===x && o.y===y && o.hp>0 && o.owner===selectedUnit.owner &&
-        UNIT_STATS[o.type].canCarry && UNIT_STATS[o.type].canCarry.includes(selectedUnit.type) && getLevel(o)==='ground' && stats.subclass==='land');
-      selectedUnit.moved = true; selectedUnit.actedAtAll = true;
-      if(hostAtDest && map[y][x].type===T_WATER){
-        const cap = UNIT_STATS[hostAtDest.type].portageCapacity;
-        if(hostAtDest.cargo.length < cap){
-          selectedUnit.hostId = hostAtDest.id;
-          selectedUnit.x = hostAtDest.x; selectedUnit.y = hostAtDest.y;
-          hostAtDest.cargo.push(selectedUnit.id);
-          updateInfoPanel(`${stats.name} an Bord von ${UNIT_STATS[hostAtDest.type].name} geladen.`);
-        }
+        UNIT_STATS[o.type].canCarry && UNIT_STATS[o.type].canCarry.includes(selectedUnit.type));
+      const costUsed = reachDist[key(x,y)] || 0;
+      selectedUnit.movesLeft = Math.max(0, selectedUnit.movesLeft - costUsed);
+      selectedUnit.actedAtAll = true;
+      if(selectedUnit.movesLeft<=0) selectedUnit.moved = true;
+
+      if(hostAtDest && hostAtDest.cargo.length < UNIT_STATS[hostAtDest.type].portageCapacity){
+        selectedUnit.hostId = hostAtDest.id;
+        selectedUnit.x = hostAtDest.x; selectedUnit.y = hostAtDest.y;
+        selectedUnit.moved = true; selectedUnit.movesLeft = 0;
+        hostAtDest.cargo.push(selectedUnit.id);
+        updateInfoPanel(`${stats.name} an Bord von ${UNIT_STATS[hostAtDest.type].name} geladen.`);
       } else {
         selectedUnit.x = x; selectedUnit.y = y;
         const destTile = map[y][x];
@@ -998,21 +1239,23 @@ function handleGameClick(sx, sy){
           }
         } else {
           refuelIfOnOwnCity(selectedUnit);
-          updateInfoPanel(destTile.type===T_CITY ? 'Bewegt, ggf. aufgetankt/repariert nächste Rast.' : 'Einheit bewegt.');
+          updateInfoPanel(selectedUnit.movesLeft>0 ? `Bewegt — noch ${selectedUnit.movesLeft} Bewegungspunkt(e) übrig.` : 'Einheit bewegt.');
         }
       }
+      const movedUnit = selectedUnit;
+      const stillSelectable = units.includes(movedUnit) && !movedUnit.moved;
       deselect();
+      if(stillSelectable) selectUnit(movedUnit);
       checkGameOver(); updateHud();
       return;
     }
 
-    // Anderswo geklickt -> ggf. neue eigene Einheit auswählen
-    const clicked = unitsAt(x,y).find(u=>u.owner===OWNER_PLAYER && !u.moved);
+    const clicked = unitsAt(x,y).find(u=>u.owner===OWNER_PLAYER && (!u.moved || u.orderState));
     if(clicked) selectUnit(clicked); else deselect();
     return;
   }
 
-  const clicked = unitsAt(x,y).find(u=>u.owner===OWNER_PLAYER && !u.moved);
+  const clicked = unitsAt(x,y).find(u=>u.owner===OWNER_PLAYER && (!u.moved || u.orderState));
   if(clicked) selectUnit(clicked);
 }
 
@@ -1035,7 +1278,7 @@ function renderBuildPanel(){
   const tile = map[y][x];
   const coastal = isCoastal(x,y);
   if(UNIT_STATS[tile.buildType].subclass==='sea' && !coastal){
-    tile.buildType = 'infantry'; // Sicherheitsnetz: keine Seeeinheiten im Landesinneren
+    tile.buildType = 'infantry';
   }
   document.getElementById('build-city-title').textContent = (tile.capital ? 'Hauptstadt' : 'Stadt') + (coastal ? ' ⚓' : '');
 
@@ -1055,8 +1298,9 @@ function renderBuildPanel(){
     btn.className = 'build-option' + (tile.buildType===type ? ' active' : '') + (disabled ? ' disabled' : '');
     const fuelStr = stats.fuel !== undefined ? `, Sprit ${stats.fuel}` : '';
     const rangeStr = stats.range>0 ? `, Reich ${stats.range}` : '';
+    const portStr = stats.portageCapacity ? `, Fracht ${stats.portageCapacity}` : '';
     btn.innerHTML = `<span class="bo-name">${stats.label} ${stats.name}</span>` +
-      `<span class="bo-stats">${disabled ? 'Nur in Küstenstädten (angrenzendes Wasser)' : `Bew ${stats.move} / Dmg ${stats.dmg} / Ang% ${stats.power} / Vert% ${stats.defense} / HP ${stats.hp}${rangeStr}${fuelStr}`}</span>` +
+      `<span class="bo-stats">${disabled ? 'Nur in Küstenstädten (angrenzendes Wasser)' : `Bew ${stats.move} / Dmg ${stats.dmg} / Ang% ${stats.power} / Vert% ${stats.defense} / HP ${stats.hp}${rangeStr}${fuelStr}${portStr}`}</span>` +
       `<span class="bo-cost">${stats.cost}⚙</span>`;
     if(disabled){
       btn.disabled = true;
@@ -1083,13 +1327,13 @@ document.getElementById('info-close-btn').addEventListener('click', () => unitIn
 
 function buildUnitInfoTable(){
   const table = document.getElementById('unit-info-table');
-  let html = '<tr><th>Einheit</th><th>Klasse</th><th>Bew.</th><th>Dmg</th><th>Ang%</th><th>Vert%</th><th>HP</th><th>Kosten</th><th>Reich.</th><th>Sprit</th></tr>';
+  let html = '<tr><th>Einheit</th><th>Klasse</th><th>Bew.</th><th>Dmg</th><th>Ang%</th><th>Vert%</th><th>HP</th><th>Kosten</th><th>Reich.</th><th>Fracht</th><th>Sprit</th></tr>';
   for(const type of BUILD_ORDER){
     const s = UNIT_STATS[type];
     const cls = s.category==='air' ? 'Luft' : (s.subclass==='sea' ? 'See' : 'Boden');
     html += `<tr><td>${s.label} ${s.name}</td><td>${cls}</td>` +
       `<td>${s.move}</td><td>${s.dmg}</td><td>${s.power}</td><td>${s.defense}</td><td>${s.hp}</td><td>${s.cost}</td>` +
-      `<td>${s.range||'-'}</td><td>${s.fuel !== undefined ? s.fuel : '∞'}</td></tr>`;
+      `<td>${s.range||'-'}</td><td>${s.portageCapacity||'-'}</td><td>${s.fuel !== undefined ? s.fuel : '∞'}</td></tr>`;
   }
   table.innerHTML = html;
 }
@@ -1098,10 +1342,10 @@ function buildUnitInfoTable(){
 function pickAiBuildType(coastal){
   const t = turnNumber;
   let weights;
-  if(t < 6) weights = { infantry:0.55, tank:0.25, artillery:0.2, destroyer:0, submarine:0, helicopter:0, fighter:0 };
-  else if(t < 12) weights = { infantry:0.3, tank:0.25, artillery:0.15, destroyer:0.1, submarine:0.05, helicopter:0.1, fighter:0.05 };
-  else weights = { infantry:0.2, tank:0.22, artillery:0.13, destroyer:0.12, submarine:0.08, helicopter:0.12, fighter:0.13 };
-  if(!coastal) weights = Object.assign({}, weights, { destroyer:0, submarine:0 });
+  if(t < 6) weights = { infantry:0.55, tank:0.25, artillery:0.2, destroyer:0, transport:0, battleship:0, carrier:0, submarine:0, helicopter:0, fighter:0 };
+  else if(t < 14) weights = { infantry:0.28, tank:0.24, artillery:0.14, destroyer:0.08, transport:0.08, battleship:0.04, carrier:0.02, submarine:0.04, helicopter:0.06, fighter:0.02 };
+  else weights = { infantry:0.16, tank:0.2, artillery:0.1, destroyer:0.08, transport:0.08, battleship:0.1, carrier:0.06, submarine:0.08, helicopter:0.08, fighter:0.06 };
+  if(!coastal) weights = Object.assign({}, weights, { destroyer:0, transport:0, battleship:0, carrier:0, submarine:0 });
   const total = BUILD_ORDER.reduce((a,type)=>a+(weights[type]||0), 0);
   const r = Math.random() * total;
   let acc = 0;
@@ -1121,14 +1365,13 @@ function processCityProduction(owner){
         tile.buildPoints += rate;
         let type = tile.buildType || 'infantry';
         if(UNIT_STATS[type].subclass==='sea' && !isCoastal(x,y)){
-          // Sicherheitsnetz: Seeeinheiten können nicht im Landesinneren produziert werden
           type = 'infantry';
           tile.buildType = 'infantry';
         }
         const cost = UNIT_STATS[type].cost;
         if(tile.buildPoints >= cost){
           const candidates = adjacentTiles(x,y).filter(p => {
-            const dummy = { type, owner, x:p.x, y:p.y };
+            const dummy = { type, owner, x:p.x, y:p.y, subLevel:null };
             if(!terrainAllowed(map[p.y][p.x], dummy)) return false;
             return slotStatus(p.x,p.y,dummy) === true;
           });
@@ -1136,7 +1379,7 @@ function processCityProduction(owner){
             const spot = candidates[Math.floor(Math.random()*candidates.length)];
             spawnUnit(owner, type, spot.x, spot.y);
             tile.buildPoints -= cost;
-            if(owner===OWNER_AI) tile.buildType = pickAiBuildType(isCoastal(x,y));
+            if(owner!==OWNER_PLAYER) tile.buildType = pickAiBuildType(isCoastal(x,y));
           } else {
             tile.buildPoints = cost;
           }
@@ -1146,17 +1389,14 @@ function processCityProduction(owner){
   }
 }
 
-function refuelIfOnOwnCity(u){
-  if(u.type !== 'fighter') return;
-  const tile = map[u.y][u.x];
-  if(tile.type===T_CITY && tile.owner===u.owner){
-    u.fuel = UNIT_STATS.fighter.fuel;
-  }
-}
-
 function processFuel(owner){
-  const fighters = units.filter(u => u.owner===owner && u.type==='fighter' && u.hp>0 && !u.hostId);
+  const fighters = units.filter(u => u.owner===owner && u.type==='fighter' && u.hp>0);
   for(const f of fighters){
+    if(f.hostId){
+      const host = units.find(h=>h.id===f.hostId);
+      if(host && host.type==='carrier'){ f.fuel = UNIT_STATS.fighter.fuel; continue; }
+    }
+    if(f.hostId) continue;
     const tile = map[f.y][f.x];
     if(tile.type===T_CITY && tile.owner===owner){
       f.fuel = UNIT_STATS.fighter.fuel;
@@ -1167,7 +1407,8 @@ function processFuel(owner){
   }
 }
 
-// Effektivität/Erfahrung/Reparatur/Eingraben-Übergänge am Ende des Zugs eines Spielers
+// Effektivität/Erfahrung/Reparatur/Eingraben-Übergänge + Bewegungspunkte-Reset
+// am Ende des Zugs eines Spielers.
 function processEndOfTurnUnitState(owner){
   for(const u of unitsOf(owner)){
     const s = UNIT_STATS[u.type];
@@ -1178,40 +1419,60 @@ function processEndOfTurnUnitState(owner){
       u.effectiveness = Math.max(cap, u.effectiveness-1);
       const tile = map[u.y][u.x];
       if(tile.type===T_CITY && tile.owner===owner && u.hp < s.hp){
-        u.hp = s.hp; // Reparatur: volle Heilung nach einer Rast in eigener Stadt (vereinfacht)
+        u.hp = s.hp;
       }
     }
     if(u.digPending==='in'){ u.dugIn = true; u.digPending = null; }
     else if(u.digPending==='out'){ u.dugIn = false; u.digPending = null; }
     u.moved = false;
+    u.movesLeft = isCrippled(u) ? Math.max(1, Math.floor(s.move/2)) : s.move;
     u.firedThisTurn = false;
     u.foughtThisTurn = false;
     u.actedAtAll = false;
   }
 }
 
-// Vereinfachtes Defensivfeuer: am Ende des gegnerischen Zugs feuert jede ruhende,
-// dazu fähige Einheit einmal automatisch auf das nächste feindliche Ziel in Reichweite.
-function processDefensiveFire(defenderOwner){
-  const shooters = units.filter(u => u.owner===defenderOwner && u.hp>0 && !u.hostId &&
-    UNIT_STATS[u.type].canDefensiveFire && !u.actedAtAll && !u.firedThisTurn);
-  const enemyOwner = defenderOwner===OWNER_PLAYER ? OWNER_AI : OWNER_PLAYER;
-  for(const u of shooters){
-    const s = UNIT_STATS[u.type];
-    let best = null, bestD = Infinity;
-    for(const e of unitsOf(enemyOwner)){
-      const d = Math.max(Math.abs(e.x-u.x), Math.abs(e.y-u.y));
-      if(d<=s.range && d<bestD){ bestD=d; best=e; }
-    }
-    if(best){
-      const res = resolveRangedAttack(u, best);
-      u.firedThisTurn = true;
-      if(res.destroyed || res.hitAny) MusicEngine.start();
+// Rasten/Warten-Stationsbefehle bei Rundenbeginn auswerten: bei Feindkontakt (oder für
+// Rasten zusätzlich bei voller HP) wird die Einheit reaktiviert und dem Spieler zurückgegeben.
+function processOrderStates(owner){
+  for(const u of unitsOf(owner)){
+    if(!u.orderState) continue;
+    const enemyAdjacent = adjacentTiles(u.x,u.y).some(t => pickDefenderAt(t.x,t.y,u));
+    const fullyHealed = u.orderState==='resting' && u.hp >= UNIT_STATS[u.type].hp;
+    if(enemyAdjacent || fullyHealed){
+      u.orderState = null;
+      u.moved = false;
+    } else {
+      u.moved = true;
+      u.movesLeft = 0;
     }
   }
 }
 
-/* ---------- ZUG BEENDEN ---------- */
+// Vereinfachtes Defensivfeuer: nach dem Zug eines Spielers feuert jede ruhende,
+// dazu fähige gegnerische Einheit einmal automatisch auf das nächste Ziel in Reichweite.
+function processDefensiveFire(activeOwner){
+  for(const defenderOwner of activeOwners()){
+    if(defenderOwner === activeOwner) continue;
+    const shooters = units.filter(u => u.owner===defenderOwner && u.hp>0 && !u.hostId &&
+      UNIT_STATS[u.type].canDefensiveFire && !u.actedAtAll && !u.firedThisTurn);
+    for(const u of shooters){
+      const s = UNIT_STATS[u.type];
+      let best = null, bestD = Infinity;
+      for(const e of units.filter(x=>x.owner!==defenderOwner && x.owner!==OWNER_NEUTRAL && x.hp>0 && !x.hostId)){
+        const d = Math.max(Math.abs(e.x-u.x), Math.abs(e.y-u.y));
+        if(d<=s.range && d<bestD){ bestD=d; best=e; }
+      }
+      if(best){
+        const res = resolveRangedAttack(u, best);
+        u.firedThisTurn = true;
+        if(res.destroyed || res.hitAny) MusicEngine.start();
+      }
+    }
+  }
+}
+
+/* ---------- ZUGREIHENFOLGE ---------- */
 document.getElementById('end-turn-btn').addEventListener('click', endPlayerTurn);
 
 function endPlayerTurn(){
@@ -1220,52 +1481,96 @@ function endPlayerTurn(){
   closeBuildPanel();
   processCityProduction(OWNER_PLAYER);
   processFuel(OWNER_PLAYER);
-  processDefensiveFire(OWNER_AI);
+  processDefensiveFire(OWNER_PLAYER);
   processEndOfTurnUnitState(OWNER_PLAYER);
-  currentTurnOwner = OWNER_AI;
+  checkGameOver();
+  if(gameOver) return;
   updateHud();
   updateInfoPanel('Der Gegner ist am Zug...');
-  setTimeout(runAiTurn, 500);
+  setTimeout(advanceTurn, 300);
+}
+
+function advanceTurn(){
+  turnIndex++;
+  if(turnIndex >= turnOrder.length){ turnIndex = 0; turnNumber++; }
+  currentTurnOwner = turnOrder[turnIndex];
+
+  if(currentTurnOwner === OWNER_PLAYER){
+    processOrderStates(OWNER_PLAYER);
+    for(const u of unitsOf(OWNER_PLAYER)) advanceWaypoint(u);
+    updateHud();
+    updateInfoPanel(`Runde ${turnNumber} — Du bist am Zug.`);
+    render();
+    return;
+  }
+  if(isEliminated(currentTurnOwner)){
+    setTimeout(advanceTurn, 20);
+    return;
+  }
+  updateHud();
+  updateInfoPanel(`${ownerLabel(currentTurnOwner)} ist am Zug...`);
+  setTimeout(() => runAiOwnerTurn(currentTurnOwner), 350);
 }
 
 /* ---------- KI ---------- */
-function runAiTurn(){
-  if(gameOver) return;
-  const aiUnits = unitsOf(OWNER_AI).filter(u=>u.hp>0);
-  for(const u of aiUnits){
-    if(u.hp<=0 || u.moved) continue;
-    aiActUnit(u);
+function hostileTargetsFor(owner){
+  const targets = [];
+  for(const o of activeOwners()){
+    if(o===owner) continue;
+    citiesOf(o).forEach(c=>targets.push({x:c.x,y:c.y}));
   }
-  processCityProduction(OWNER_AI);
-  processFuel(OWNER_AI);
-  processDefensiveFire(OWNER_PLAYER);
-  processEndOfTurnUnitState(OWNER_AI);
-  currentTurnOwner = OWNER_PLAYER;
-  turnNumber++;
+  citiesOf(OWNER_NEUTRAL).forEach(c=>targets.push({x:c.x,y:c.y}));
+  units.filter(u=>u.owner!==owner && u.owner!==OWNER_NEUTRAL && u.hp>0 && !u.hostId)
+    .forEach(u=>targets.push({x:u.x,y:u.y}));
+  return targets;
+}
+
+function runAiOwnerTurn(owner){
+  if(gameOver) return;
+  processOrderStates(owner);
+  for(const u of unitsOf(owner)) advanceWaypoint(u);
+
+  const myUnits = () => unitsOf(owner).filter(u=>u.hp>0 && !u.moved);
+  for(const u of myUnits()){
+    if(UNIT_STATS[u.type].subclass==='sea' && u.cargo && u.cargo.length>0) aiActShipWithCargo(u);
+  }
+  for(const u of myUnits()){
+    if(UNIT_STATS[u.type].subclass!=='sea') aiActUnit(u);
+  }
+  for(const u of myUnits()){
+    if(UNIT_STATS[u.type].subclass==='sea') aiActShipPickup(u);
+  }
+
+  processCityProduction(owner);
+  processFuel(owner);
+  processDefensiveFire(owner);
+  processEndOfTurnUnitState(owner);
   checkGameOver();
-  updateHud();
-  updateInfoPanel(`Runde ${turnNumber} — Du bist am Zug.`);
-  render();
+  if(gameOver) return;
+  advanceTurn();
 }
 
 function aiActUnit(unit){
   const stats = UNIT_STATS[unit.type];
-  const targets = [];
-  citiesOf(OWNER_PLAYER).forEach(c=>targets.push({x:c.x,y:c.y}));
-  citiesOf(OWNER_NEUTRAL).forEach(c=>targets.push({x:c.x,y:c.y}));
-  unitsOf(OWNER_PLAYER).forEach(p=>targets.push({x:p.x,y:p.y}));
+  let targets = hostileTargetsFor(unit.owner);
   if(targets.length===0) return;
 
-  let best = null, bestDist = Infinity;
+  if(stats.subclass==='land'){
+    const myLm = (landmassId[unit.y] && landmassId[unit.y][unit.x]!==undefined) ? landmassId[unit.y][unit.x] : -1;
+    const sameIsland = targets.filter(t => landmassId[t.y] && landmassId[t.y][t.x]===myLm);
+    if(sameIsland.length>0) targets = sameIsland;
+    else { aiSeekTransport(unit, myLm); return; }
+  }
+
+  let best=null, bestDist=Infinity;
   for(const t of targets){
     const d = Math.abs(t.x-unit.x)+Math.abs(t.y-unit.y);
-    if(d < bestDist){ bestDist = d; best = t; }
+    if(d<bestDist){ bestDist=d; best=t; }
   }
   if(!best) return;
 
-  // Fernkampf, falls möglich und im Vorteil (Ziel in Reichweite, ohne zu ziehen)
   if(stats.range > 0){
-    let rTarget = null, rDist = Infinity;
+    let rTarget=null, rDist=Infinity;
     for(let dy=-stats.range; dy<=stats.range; dy++){
       for(let dx=-stats.range; dx<=stats.range; dx++){
         if(dx===0 && dy===0) continue;
@@ -1273,57 +1578,56 @@ function aiActUnit(unit){
         const nx=unit.x+dx, ny=unit.y+dy;
         if(!inBounds(nx,ny)) continue;
         const def = pickDefenderAt(nx,ny,unit);
-        if(def && def.target.owner===OWNER_PLAYER){
+        if(def && def.target.owner!==unit.owner){
           const d = Math.max(Math.abs(dx),Math.abs(dy));
           if(d<rDist){ rDist=d; rTarget=def.target; }
         }
       }
     }
-    if(rTarget){
-      resolveRangedAttack(unit, rTarget);
-      MusicEngine.start();
-      return;
-    }
+    if(rTarget){ resolveRangedAttack(unit, rTarget); MusicEngine.start(); return; }
   }
 
   const adj = adjacentTiles(unit.x,unit.y);
   for(const a of adj){
     const def = pickDefenderAt(a.x,a.y,unit);
-    if(def && def.target.owner===OWNER_PLAYER){
+    if(def && def.target.owner!==unit.owner){
       const res = resolveMeleeAttack(unit, def.target, def.noEntry);
       MusicEngine.start();
       if(res.winner==='attacker' && res.entered){
-        unit.x = a.x; unit.y = a.y;
-        const t = map[a.y][a.x];
-        if(t.type===T_CITY && t.owner!==OWNER_AI && stats.subclass==='land') captureCity(a.x,a.y,OWNER_AI,unit);
+        unit.x=a.x; unit.y=a.y;
+        const t=map[a.y][a.x];
+        if(t.type===T_CITY && t.owner!==unit.owner && stats.subclass==='land') captureCity(a.x,a.y,unit.owner,unit);
       }
+      unit.moved = true; unit.movesLeft = 0;
       return;
     }
     const tile = map[a.y][a.x];
-    if(unitsAt(a.x,a.y).length===0 && tile.type===T_CITY && tile.owner!==OWNER_AI && stats.subclass==='land'){
-      unit.x = a.x; unit.y = a.y;
-      captureCity(a.x,a.y, OWNER_AI, unit);
+    if(unitsAt(a.x,a.y).length===0 && tile.type===T_CITY && tile.owner!==unit.owner && stats.subclass==='land'){
+      unit.x=a.x; unit.y=a.y;
+      captureCity(a.x,a.y, unit.owner, unit);
+      unit.moved = true; unit.movesLeft = 0;
       return;
     }
   }
 
   const path = computePathTowards(unit, best);
   if(!path || path.length===0) return;
-  let remaining = stats.move;
+  let remaining = unit.movesLeft;
   for(let i=0;i<path.length;i++){
     const step = path[i];
     const isLast = i===path.length-1;
     const def = isLast ? pickDefenderAt(step.x, step.y, unit) : null;
     if(def){
-      if(def.target.owner===OWNER_PLAYER){
+      if(def.target.owner!==unit.owner){
         const res = resolveMeleeAttack(unit, def.target, def.noEntry);
         MusicEngine.start();
         if(res.winner==='attacker' && res.entered){
-          unit.x = step.x; unit.y = step.y;
-          const t = map[step.y][step.x];
-          if(t.type===T_CITY && t.owner!==OWNER_AI && stats.subclass==='land') captureCity(step.x, step.y, OWNER_AI, unit);
+          unit.x=step.x; unit.y=step.y;
+          const t=map[step.y][step.x];
+          if(t.type===T_CITY && t.owner!==unit.owner && stats.subclass==='land') captureCity(step.x, step.y, unit.owner, unit);
         }
       }
+      unit.moved = true; unit.movesLeft = 0;
       return;
     }
     const cost = terrainCost(map[step.y][step.x], unit);
@@ -1332,25 +1636,162 @@ function aiActUnit(unit){
     unit.x = step.x; unit.y = step.y;
     refuelIfOnOwnCity(unit);
     const t = map[step.y][step.x];
-    if(t.type===T_CITY && t.owner!==OWNER_AI && stats.subclass==='land'){
-      captureCity(step.x, step.y, OWNER_AI, unit);
+    if(t.type===T_CITY && t.owner!==unit.owner && stats.subclass==='land'){
+      captureCity(step.x, step.y, unit.owner, unit);
     }
   }
+  unit.movesLeft = remaining;
+  unit.moved = remaining<=0;
+  unit.actedAtAll = true;
+}
+
+// Landeinheit ohne erreichbares Ziel auf der eigenen Landmasse: zur Küste marschieren
+// und bei einem angrenzenden freundlichen Schiff mit Platz einsteigen.
+function aiSeekTransport(unit, myLm){
+  if(unit.hostId) return;
+  for(const a of adjacentTiles(unit.x,unit.y)){
+    const host = units.find(o=>o.x===a.x && o.y===a.y && o.hp>0 && !o.hostId && o.owner===unit.owner &&
+      UNIT_STATS[o.type].canCarry && UNIT_STATS[o.type].canCarry.includes(unit.type));
+    if(host && host.cargo.length < UNIT_STATS[host.type].portageCapacity){
+      unit.hostId = host.id;
+      host.cargo.push(unit.id);
+      unit.moved = true; unit.movesLeft = 0; unit.actedAtAll = true;
+      return;
+    }
+  }
+  let bestCoast=null, bestDist=Infinity;
+  for(let y=0;y<ROWS;y++){
+    for(let x=0;x<COLS;x++){
+      if(landmassId[y][x]!==myLm || !isCoastal(x,y)) continue;
+      const d = Math.abs(x-unit.x)+Math.abs(y-unit.y);
+      if(d<bestDist){ bestDist=d; bestCoast={x,y}; }
+    }
+  }
+  if(!bestCoast){ unit.moved=true; unit.movesLeft=0; return; }
+  const path = computePathTowards(unit, bestCoast);
+  if(!path || path.length===0){ unit.moved=true; unit.movesLeft=0; return; }
+  let remaining = unit.movesLeft;
+  for(const step of path){
+    const cost = terrainCost(map[step.y][step.x], unit);
+    if(cost>remaining) break;
+    remaining -= cost;
+    unit.x=step.x; unit.y=step.y;
+  }
+  unit.movesLeft = remaining;
   unit.moved = true;
   unit.actedAtAll = true;
 }
 
+// Schiff MIT Fracht: zur nächsten Wasserkachel neben feindlichem/neutralem Territorium
+// segeln und dort die erste Frachteinheit anlanden.
+function aiActShipWithCargo(ship){
+  const cargoOwner = ship.owner;
+  let best=null, bestDist=Infinity;
+  for(let y=0;y<ROWS;y++){
+    for(let x=0;x<COLS;x++){
+      if(map[y][x].type!==T_WATER) continue;
+      const landAdj = DIRS4.map(([dx,dy])=>({x:x+dx,y:y+dy})).filter(p=>inBounds(p.x,p.y) && map[p.y][p.x].type!==T_WATER);
+      if(landAdj.length===0) continue;
+      const hasTarget = landAdj.some(p => {
+        const lm = landmassId[p.y][p.x];
+        if(lm<0) return false;
+        if(map[p.y][p.x].type===T_CITY && map[p.y][p.x].owner!==cargoOwner) return true;
+        return citiesOf(OWNER_NEUTRAL).some(c=>landmassId[c.y][c.x]===lm) ||
+          activeOwners().some(o=>o!==cargoOwner && citiesOf(o).some(c=>landmassId[c.y][c.x]===lm)) ||
+          units.some(u=>u.owner!==cargoOwner && u.owner!==OWNER_NEUTRAL && u.hp>0 && landmassId[u.y] && landmassId[u.y][u.x]===lm);
+      });
+      if(!hasTarget) continue;
+      const d = Math.abs(x-ship.x)+Math.abs(y-ship.y);
+      if(d<bestDist){ bestDist=d; best={x,y}; }
+    }
+  }
+  if(!best){ ship.moved=true; ship.movesLeft=0; return; }
+
+  const path = computePathTowards(ship, best);
+  if(!path || path.length===0){ ship.moved=true; ship.movesLeft=0; return; }
+  let remaining = ship.movesLeft;
+  for(const step of path){
+    const cost = terrainCost(map[step.y][step.x], ship);
+    if(cost>remaining) break;
+    remaining -= cost;
+    ship.x=step.x; ship.y=step.y;
+  }
+  ship.movesLeft = remaining;
+  ship.moved = true;
+  ship.actedAtAll = true;
+
+  if(ship.cargo.length>0){
+    const cargoUnit = units.find(u=>u.id===ship.cargo[0]);
+    if(cargoUnit){
+      const landSpot = adjacentTiles(ship.x,ship.y).find(a =>
+        map[a.y][a.x].type!==T_WATER && terrainAllowed(map[a.y][a.x], cargoUnit) && unitsAt(a.x,a.y).length===0);
+      if(landSpot){
+        cargoUnit.x=landSpot.x; cargoUnit.y=landSpot.y; cargoUnit.hostId=null;
+        cargoUnit.moved=true; cargoUnit.movesLeft=0; cargoUnit.actedAtAll=true;
+        ship.cargo = ship.cargo.filter(id=>id!==cargoUnit.id);
+      }
+    }
+  }
+}
+
+// Leeres Transportfähiges Schiff: eigene gestrandete Einheit an der Küste abholen,
+// sonst normal wie eine Kampfeinheit agieren.
+function aiActShipPickup(ship){
+  const s = UNIT_STATS[ship.type];
+  if(!s.canCarry || ship.cargo.length >= s.portageCapacity){ aiActUnit(ship); return; }
+
+  const stranded = unitsOf(ship.owner).filter(u => {
+    if(u.hostId) return false;
+    if(!s.canCarry.includes(u.type)) return false;
+    return isCoastal(u.x,u.y);
+  });
+  if(stranded.length===0){ aiActUnit(ship); return; }
+
+  let best=null, bestDist=Infinity;
+  for(const u of stranded){
+    const d = Math.abs(u.x-ship.x)+Math.abs(u.y-ship.y);
+    if(d<bestDist){ bestDist=d; best=u; }
+  }
+  if(Math.max(Math.abs(best.x-ship.x), Math.abs(best.y-ship.y)) <= 1){
+    best.hostId = ship.id; ship.cargo.push(best.id);
+    best.moved=true; best.movesLeft=0; best.actedAtAll=true;
+    ship.moved=true; ship.movesLeft=0; ship.actedAtAll=true;
+    return;
+  }
+  const waterSpots = adjacentTiles(best.x,best.y).filter(t=>map[t.y][t.x].type===T_WATER);
+  if(waterSpots.length===0){ ship.moved=true; ship.movesLeft=0; return; }
+  let target=null, tDist=Infinity;
+  for(const w of waterSpots){
+    const d = Math.abs(w.x-ship.x)+Math.abs(w.y-ship.y);
+    if(d<tDist){ tDist=d; target=w; }
+  }
+  const path = computePathTowards(ship, target);
+  if(!path || path.length===0){ ship.moved=true; ship.movesLeft=0; return; }
+  let remaining = ship.movesLeft;
+  for(const step of path){
+    const cost = terrainCost(map[step.y][step.x], ship);
+    if(cost>remaining) break;
+    remaining -= cost;
+    ship.x=step.x; ship.y=step.y;
+  }
+  ship.movesLeft = remaining;
+  ship.moved = true;
+  ship.actedAtAll = true;
+
+  if(Math.max(Math.abs(best.x-ship.x), Math.abs(best.y-ship.y)) <= 1 && !best.hostId){
+    best.hostId = ship.id; ship.cargo.push(best.id);
+    best.moved=true; best.movesLeft=0; best.actedAtAll=true;
+  }
+}
+
 /* ---------- SIEG / NIEDERLAGE ---------- */
 function checkGameOver(){
-  const playerCities = citiesOf(OWNER_PLAYER).length;
-  const aiCities = citiesOf(OWNER_AI).length;
-  const playerUnits = unitsOf(OWNER_PLAYER).length;
-  const aiUnits = unitsOf(OWNER_AI).length;
-
-  if(aiCities===0 && aiUnits===0){
-    endGame(true, 'Du hast alle gegnerischen Streitkräfte vernichtet!');
-  } else if(playerCities===0 && playerUnits===0){
+  if(isEliminated(OWNER_PLAYER)){
     endGame(false, 'Deine Armee wurde vollständig aufgerieben.');
+    return;
+  }
+  if(aiOwners.length>0 && aiOwners.every(o => isEliminated(o))){
+    endGame(true, 'Du hast alle gegnerischen Streitkräfte vernichtet!');
   }
 }
 
@@ -1365,11 +1806,16 @@ function endGame(won, text){
 /* ---------- HUD ---------- */
 function updateHud(){
   document.getElementById('turn-indicator').textContent =
-    `Runde ${turnNumber} — ${currentTurnOwner===OWNER_PLAYER ? 'Dein Zug' : 'Gegner zieht...'}`;
-  document.getElementById('player-cities').textContent = citiesOf(OWNER_PLAYER).length;
-  document.getElementById('player-units').textContent = unitsOf(OWNER_PLAYER).length;
-  document.getElementById('ai-cities').textContent = citiesOf(OWNER_AI).length;
-  document.getElementById('ai-units').textContent = unitsOf(OWNER_AI).length;
+    `Runde ${turnNumber} — ${currentTurnOwner===OWNER_PLAYER ? 'Dein Zug' : ownerLabel(currentTurnOwner)+' zieht...'}`;
+  const center = document.getElementById('hud-center');
+  center.innerHTML = '';
+  for(const o of activeOwners()){
+    const chip = document.createElement('span');
+    chip.className = 'hud-chip';
+    const dead = isEliminated(o) ? ' (besiegt)' : '';
+    chip.innerHTML = `<span class="hud-dot" style="background:${OWNER_COLORS[o]}"></span>${ownerLabel(o)}: <b>${citiesOf(o).length}</b> Städte / <b>${allUnitsOf(o).length}</b> Einh.${dead}`;
+    center.appendChild(chip);
+  }
 }
 function updateInfoPanel(text){
   document.getElementById('info-panel').textContent = text;
@@ -1382,11 +1828,6 @@ const TILE_COLORS = {
   [T_HILLS]: '#3a3a28',
   [T_MOUNTAIN]: '#4a4a52',
   [T_WATER]: '#163a52'
-};
-const OWNER_COLORS = {
-  [OWNER_PLAYER]: '#3fa9f5',
-  [OWNER_AI]: '#f5473f',
-  [OWNER_NEUTRAL]: '#8a8f9a'
 };
 const EFF_COLORS = { fresh:'#5ad65a', rested:'#5ad65a', ready:'#5ad65a', used:'#e0c04a', tired:'#e0c04a', exhausted:'#e0473f' };
 
@@ -1483,6 +1924,27 @@ function render(){
     gctx.fillRect(scr.x, scr.y, tsz, tsz);
   }
 
+  if(selectedUnit && selectedUnit.destination){
+    const from = worldToScreen(selectedUnit.x*BASE_TILE+BASE_TILE/2, selectedUnit.y*BASE_TILE+BASE_TILE/2);
+    const to = worldToScreen(selectedUnit.destination.x*BASE_TILE+BASE_TILE/2, selectedUnit.destination.y*BASE_TILE+BASE_TILE/2);
+    gctx.strokeStyle = 'rgba(224,184,74,0.8)';
+    gctx.lineWidth = 2;
+    gctx.setLineDash([6,4]);
+    gctx.beginPath(); gctx.moveTo(from.x, from.y); gctx.lineTo(to.x, to.y); gctx.stroke();
+    gctx.setLineDash([]);
+    gctx.fillStyle = '#e0b84a';
+    gctx.beginPath(); gctx.arc(to.x, to.y, 6, 0, Math.PI*2); gctx.fill();
+  }
+  if(unitDragMode && dragPreviewTarget && selectedUnit){
+    const from = worldToScreen(selectedUnit.x*BASE_TILE+BASE_TILE/2, selectedUnit.y*BASE_TILE+BASE_TILE/2);
+    const to = worldToScreen(dragPreviewTarget.x*BASE_TILE+BASE_TILE/2, dragPreviewTarget.y*BASE_TILE+BASE_TILE/2);
+    gctx.strokeStyle = 'rgba(63,169,245,0.8)';
+    gctx.lineWidth = 2;
+    gctx.setLineDash([4,3]);
+    gctx.beginPath(); gctx.moveTo(from.x, from.y); gctx.lineTo(to.x, to.y); gctx.stroke();
+    gctx.setLineDash([]);
+  }
+
   for(const u of units){
     if(u.hp<=0 || u.hostId) continue;
     if(u.x<startX-1 || u.x>endX+1 || u.y<startY-1 || u.y>endY+1) continue;
@@ -1490,6 +1952,56 @@ function render(){
   }
 
   renderMinimap();
+}
+
+// Zeichnet eine an den Einheitentyp angelehnte Silhouette statt eines reinen Kreises.
+function drawUnitShape(type, isAir){
+  gctx.beginPath();
+  switch(type){
+    case 'tank':
+      gctx.rect(-0.32,-0.16,0.64,0.32);
+      gctx.rect(-0.05,-0.28,0.3,0.16);
+      break;
+    case 'artillery':
+      gctx.rect(-0.28,-0.14,0.56,0.28);
+      gctx.moveTo(0,-0.04); gctx.lineTo(0.4,-0.22); gctx.lineTo(0.36,-0.14); gctx.lineTo(0.02,0.02);
+      break;
+    case 'infantry':
+      gctx.arc(0,-0.08,0.16,0,Math.PI*2);
+      gctx.rect(-0.06,0.06,0.12,0.28);
+      break;
+    case 'destroyer':
+      gctx.moveTo(-0.4,0); gctx.lineTo(-0.2,-0.16); gctx.lineTo(0.32,-0.16); gctx.lineTo(0.42,0); gctx.lineTo(0.32,0.16); gctx.lineTo(-0.2,0.16);
+      gctx.closePath();
+      break;
+    case 'battleship':
+      gctx.moveTo(-0.45,0); gctx.lineTo(-0.25,-0.2); gctx.lineTo(0.35,-0.2); gctx.lineTo(0.48,0); gctx.lineTo(0.35,0.2); gctx.lineTo(-0.25,0.2);
+      gctx.closePath();
+      gctx.rect(-0.08,-0.32,0.16,0.14);
+      break;
+    case 'transport':
+      gctx.rect(-0.42,-0.16,0.84,0.32);
+      break;
+    case 'carrier':
+      gctx.rect(-0.46,-0.14,0.92,0.28);
+      gctx.rect(0.1,-0.3,0.16,0.18);
+      break;
+    case 'submarine':
+      gctx.ellipse(0,0,0.42,0.13,0,0,Math.PI*2);
+      gctx.rect(-0.06,-0.26,0.12,0.16);
+      break;
+    case 'fighter':
+      gctx.moveTo(0,-0.4); gctx.lineTo(0.3,0.3); gctx.lineTo(0,0.14); gctx.lineTo(-0.3,0.3);
+      gctx.closePath();
+      break;
+    case 'helicopter':
+      gctx.arc(0,0,0.26,0,Math.PI*2);
+      gctx.moveTo(-0.42,-0.32); gctx.lineTo(0.42,0.32);
+      gctx.moveTo(-0.42,0.32); gctx.lineTo(0.42,-0.32);
+      break;
+    default:
+      gctx.arc(0,0,0.34,0,Math.PI*2);
+  }
 }
 
 function drawUnit(u, tsz){
@@ -1500,24 +2012,16 @@ function drawUnit(u, tsz){
   const isSelected = selectedUnit===u;
   const isAir = s.category==='air';
   const isDeep = u.subLevel==='deep';
+  const cx = px+tsz/2, cy = py+tsz/2;
 
   gctx.save();
   if(isDeep) gctx.globalAlpha = 0.55;
 
-  gctx.beginPath();
-  if(isAir){
-    const cx = px+tsz/2, cy = py+tsz/2, r = tsz*0.36;
-    gctx.moveTo(cx, cy-r); gctx.lineTo(cx+r, cy); gctx.lineTo(cx, cy+r); gctx.lineTo(cx-r, cy);
-    gctx.closePath();
-  } else if(s.subclass==='sea'){
-    gctx.moveTo(px+tsz*0.2, py+tsz*0.35);
-    gctx.lineTo(px+tsz*0.8, py+tsz*0.35);
-    gctx.lineTo(px+tsz*0.65, py+tsz*0.75);
-    gctx.lineTo(px+tsz*0.35, py+tsz*0.75);
-    gctx.closePath();
-  } else {
-    gctx.arc(px+tsz/2, py+tsz/2, tsz*0.34, 0, Math.PI*2);
-  }
+  gctx.save();
+  gctx.translate(cx, cy);
+  gctx.scale(tsz, tsz);
+  drawUnitShape(u.type, isAir);
+  gctx.restore();
   gctx.fillStyle = color;
   gctx.fill();
   gctx.lineWidth = isSelected ? 3 : (isCrippled(u) ? 2.5 : 1.5);
@@ -1527,21 +2031,20 @@ function drawUnit(u, tsz){
   gctx.setLineDash([]);
 
   gctx.fillStyle = '#0a0e14';
-  gctx.font = `bold ${Math.floor(tsz*0.3)}px monospace`;
+  gctx.font = `bold ${Math.floor(tsz*0.28)}px monospace`;
   gctx.textAlign = 'center';
   gctx.textBaseline = 'middle';
-  gctx.fillText(s.label, px+tsz/2, py+tsz/2+1);
+  gctx.fillText(s.label, cx, cy+1);
 
   const maxHp = s.hp;
   const barW = tsz*0.6;
-  const barX = px+tsz/2-barW/2;
+  const barX = cx-barW/2;
   const barY = py+tsz*0.86;
   gctx.fillStyle = '#000';
   gctx.fillRect(barX, barY, barW, 4);
   gctx.fillStyle = u.hp/maxHp > 0.5 ? '#5ad65a' : '#e0b84a';
   gctx.fillRect(barX, barY, barW*(u.hp/maxHp), 4);
 
-  // Effektivitäts-Pip
   if(tsz>22){
     gctx.fillStyle = EFF_COLORS[EFFECTIVENESS[u.effectiveness]];
     gctx.beginPath();
@@ -1558,11 +2061,21 @@ function drawUnit(u, tsz){
     gctx.lineTo(px+tsz*0.75, py+tsz*0.92);
     gctx.stroke();
   }
+  if(u.orderState && tsz>20){
+    gctx.fillStyle = '#e0b84a';
+    gctx.font = `${Math.floor(tsz*0.3)}px sans-serif`;
+    gctx.fillText(u.orderState==='resting' ? '💤' : '⏸', cx, py+tsz*0.14);
+  }
+  if(u.destination && tsz>20 && !u.orderState){
+    gctx.fillStyle = '#e0b84a';
+    gctx.font = `${Math.floor(tsz*0.28)}px sans-serif`;
+    gctx.fillText('➤', cx, py+tsz*0.14);
+  }
 
   if(u.type==='fighter' && tsz>26){
     gctx.fillStyle = '#e0b84a';
     gctx.font = `${Math.floor(tsz*0.22)}px monospace`;
-    gctx.fillText(`⛽${u.fuel}`, px+tsz/2, py+tsz*0.14);
+    gctx.fillText(`⛽${u.fuel}`, cx, py+tsz*0.14);
   }
   if(u.cargo && u.cargo.length>0 && tsz>22){
     gctx.fillStyle = '#e0b84a';
@@ -1570,34 +2083,53 @@ function drawUnit(u, tsz){
     gctx.fillText(`+${u.cargo.length}`, px+tsz*0.86, py+tsz*0.14);
   }
 
-  if(u.moved && u.owner===OWNER_PLAYER){
+  if((u.moved || u.orderState) && u.owner===OWNER_PLAYER){
     gctx.fillStyle = 'rgba(0,0,0,0.35)';
-    gctx.beginPath();
-    gctx.arc(px+tsz/2, py+tsz/2, tsz*0.34, 0, Math.PI*2);
+    gctx.save();
+    gctx.translate(cx, cy);
+    gctx.scale(tsz, tsz);
+    drawUnitShape(u.type, isAir);
+    gctx.restore();
     gctx.fill();
   }
   gctx.restore();
 }
 
+// Terrain ändert sich innerhalb einer Partie nicht (außer Städte-Besitz) — auf großen
+// Karten wird die Terrain-Ebene daher einmalig in ein Offscreen-Canvas vorgerendert,
+// damit renderMinimap() bei jedem Kamera-Pan nicht die ganze Karte neu durchlaufen muss.
+let minimapTerrainCanvas = null;
+function buildMinimapTerrainCache(){
+  minimapTerrainCanvas = document.createElement('canvas');
+  minimapTerrainCanvas.width = minimapCanvas.width;
+  minimapTerrainCanvas.height = minimapCanvas.height;
+  const tctx2 = minimapTerrainCanvas.getContext('2d');
+  const scale = minimapCanvas.width / worldW();
+  tctx2.fillStyle = '#12182688';
+  tctx2.fillRect(0,0,minimapCanvas.width, minimapCanvas.height);
+  for(let y=0;y<ROWS;y++){
+    for(let x=0;x<COLS;x++){
+      const t = map[y][x].type;
+      if(t===T_MOUNTAIN) tctx2.fillStyle = '#4a4a52';
+      else if(t===T_WATER) tctx2.fillStyle = '#163a52';
+      else continue;
+      tctx2.fillRect(x*BASE_TILE*scale, y*BASE_TILE*scale, Math.max(1,BASE_TILE*scale), Math.max(1,BASE_TILE*scale));
+    }
+  }
+}
+
 function renderMinimap(){
   if(map.length===0) return;
+  if(!minimapTerrainCanvas) buildMinimapTerrainCache();
   mctx.clearRect(0,0,minimapCanvas.width, minimapCanvas.height);
-  mctx.fillStyle = '#12182688';
-  mctx.fillRect(0,0,minimapCanvas.width, minimapCanvas.height);
+  mctx.drawImage(minimapTerrainCanvas, 0, 0);
   const scale = minimapCanvas.width / worldW();
 
   for(let y=0;y<ROWS;y++){
     for(let x=0;x<COLS;x++){
-      const tile = map[y][x];
-      if(tile.type===T_CITY){
-        mctx.fillStyle = OWNER_COLORS[tile.owner] || OWNER_COLORS[OWNER_NEUTRAL];
+      if(map[y][x].type===T_CITY){
+        mctx.fillStyle = OWNER_COLORS[map[y][x].owner] || OWNER_COLORS[OWNER_NEUTRAL];
         mctx.fillRect(x*BASE_TILE*scale, y*BASE_TILE*scale, 4, 4);
-      } else if(tile.type===T_MOUNTAIN){
-        mctx.fillStyle = '#4a4a52';
-        mctx.fillRect(x*BASE_TILE*scale, y*BASE_TILE*scale, BASE_TILE*scale, BASE_TILE*scale);
-      } else if(tile.type===T_WATER){
-        mctx.fillStyle = '#163a52';
-        mctx.fillRect(x*BASE_TILE*scale, y*BASE_TILE*scale, BASE_TILE*scale, BASE_TILE*scale);
       }
     }
   }
@@ -1613,28 +2145,42 @@ function renderMinimap(){
 function initGame(){
   const sizeCfg = SIZE_PRESETS[mapConfig.size] || SIZE_PRESETS.medium;
   COLS = sizeCfg.cols; ROWS = sizeCfg.rows;
+
+  const count = Math.max(1, Math.min(4, parseInt(mapConfig.aiCount,10) || 1));
+  aiOwners = AI_OWNER_POOL.slice(0, count);
+  turnOrder = [OWNER_PLAYER, ...aiOwners];
+  turnIndex = 0;
+  currentTurnOwner = OWNER_PLAYER;
+
   units = [];
   unitIdCounter = 1;
   turnNumber = 1;
-  currentTurnOwner = OWNER_PLAYER;
   selectedUnit = null;
   reachableTiles = []; attackableTiles = []; rangedTiles = []; unloadTiles = [];
   unloadingCargoUnit = null;
+  awaitingWaypointClick = false;
+  dragPreviewTarget = null;
   gameOver = false;
+  minimapTerrainCanvas = null;
   closeBuildPanel();
   document.getElementById('unit-info-panel').classList.add('hidden');
   document.getElementById('game-over').classList.add('hidden');
   document.getElementById('unit-actions').innerHTML = '';
 
-  const { playerCap, aiCap } = generateMap();
-  spawnUnit(OWNER_PLAYER, 'infantry', playerCap.x+1, playerCap.y);
-  spawnUnit(OWNER_AI, 'infantry', aiCap.x-1, aiCap.y);
+  const { capitalSpots, owners } = generateMap();
+  for(let i=0;i<owners.length;i++){
+    const spot = capitalSpots[i];
+    const dir = DIRS4[i % DIRS4.length];
+    let sx = spot.x+dir[0], sy = spot.y+dir[1];
+    if(!inBounds(sx,sy) || map[sy][sx].type===T_WATER){ sx=spot.x; sy=spot.y; }
+    spawnUnit(owners[i], 'infantry', sx, sy);
+  }
 
   resizeCanvas();
   camera.zoom = 1;
-  centerCameraOn(playerCap.x*BASE_TILE+BASE_TILE/2, playerCap.y*BASE_TILE+BASE_TILE/2);
+  centerCameraOn(capitalSpots[0].x*BASE_TILE+BASE_TILE/2, capitalSpots[0].y*BASE_TILE+BASE_TILE/2);
   updateHud();
-  updateInfoPanel('Runde 1 — Wähle eine Einheit. Straßen (goldene Linien) senken Bewegungskosten auf 1.');
+  updateInfoPanel(`Runde 1 — ${aiOwners.length} Gegner. Wähle eine Einheit. Ziehen/[Pfeile]=Karte verschieben, Mausrad/[+/-]=Zoom, [G]=Marschziel, [R/W/B]=Rasten/Warten/Befestigen, [Leertaste]=Zug beenden.`);
   render();
 }
 

@@ -40,11 +40,10 @@
   </div>
 
   <div class="setup-group">
-    <span class="setup-label">Landmasse / Wasser</span>
-    <div class="setup-options" data-group="water">
-      <button class="setup-opt" data-value="dry">Trocken</button>
-      <button class="setup-opt active" data-value="normal">Ausgewogen</button>
-      <button class="setup-opt" data-value="wet">Wasserreich</button>
+    <span class="setup-label">Landform</span>
+    <div class="setup-options" data-group="landform">
+      <button class="setup-opt active" data-value="continent">Feste Landmasse</button>
+      <button class="setup-opt" data-value="islands">Inseln</button>
     </div>
   </div>
 
@@ -57,7 +56,17 @@
     </div>
   </div>
 
-  <p class="setup-hint">"Trocken" erzeugt eine reine Landkarte — Zerstörer und U-Boote sind dann nirgends baubar.</p>
+  <div class="setup-group">
+    <span class="setup-label">Anzahl KI-Gegner</span>
+    <div class="setup-options" data-group="aiCount">
+      <button class="setup-opt active" data-value="1">1</button>
+      <button class="setup-opt" data-value="2">2</button>
+      <button class="setup-opt" data-value="3">3</button>
+      <button class="setup-opt" data-value="4">4</button>
+    </div>
+  </div>
+
+  <p class="setup-hint">Inseln: Landmassen sind getrennt, Landeinheiten brauchen Schiffe zum Übersetzen (auch die KI). Keine Diplomatie — alle gegen alle.</p>
 
   <div class="menu">
     <button id="setup-start-btn">▶ Spiel starten</button>
@@ -71,10 +80,7 @@
     <div id="hud-left">
       <span id="turn-indicator">Runde 1 — Dein Zug</span>
     </div>
-    <div id="hud-center">
-      <span id="stats-player">🟦 Du: <b id="player-cities">0</b> Städte / <b id="player-units">0</b> Einheiten</span>
-      <span id="stats-ai">🟥 Gegner: <b id="ai-cities">0</b> Städte / <b id="ai-units">0</b> Einheiten</span>
-    </div>
+    <div id="hud-center"></div>
     <div id="hud-right">
       <button id="info-btn" title="Einheiten-Übersicht">ℹ Einheiten</button>
       <button id="zoom-out-btn" title="Rauszoomen">－</button>

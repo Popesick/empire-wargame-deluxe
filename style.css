@@ -204,11 +204,26 @@ html,body{
 
 #hud-center{
   display:flex;
-  gap:24px;
+  gap:16px;
+  flex-wrap:wrap;
 }
 
-#stats-player{color:var(--player);}
-#stats-ai{color:var(--ai);}
+.hud-chip{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  color:var(--text);
+  font-size:19px;
+  white-space:nowrap;
+}
+
+.hud-dot{
+  display:inline-block;
+  width:11px;
+  height:11px;
+  border-radius:2px;
+  border:1px solid rgba(0,0,0,0.4);
+}
 
 #turn-indicator{
   font-family:'Press Start 2P', monospace;
@@ -328,7 +343,14 @@ html,body{
 }
 
 #unit-info-panel{
-  width:420px;
+  width:600px;
+  max-width:90vw;
+}
+
+#unit-info-panel table{
+  display:block;
+  max-height:60vh;
+  overflow:auto;
 }
 
 .build-panel-header{
