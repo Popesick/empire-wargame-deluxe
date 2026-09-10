@@ -30,6 +30,7 @@
 <div id="setup-screen" class="hidden">
   <h2 class="setup-title">KARTENOPTIONEN</h2>
 
+  <div class="setup-grid">
   <div class="setup-group">
     <span class="setup-label">Kartengröße</span>
     <div class="setup-options" data-group="size">
@@ -83,6 +84,7 @@
       <button class="setup-opt" data-value="on">An</button>
     </div>
   </div>
+  </div>
 
   <p class="setup-hint">Inseln: Landmassen sind getrennt, Landeinheiten brauchen Schiffe zum Übersetzen (auch die KI). Keine Diplomatie — alle gegen alle.</p>
 
@@ -119,6 +121,11 @@
       </div>
       <div id="build-progress-label"></div>
       <div id="build-progress-wrap"><div id="build-progress-bar"></div></div>
+      <div id="build-rally-row">
+        <span id="build-rally-label">Kein Sammelpunkt</span>
+        <button id="build-rally-btn">🚩 Setzen</button>
+        <button id="build-rally-clear-btn" class="hidden">×</button>
+      </div>
       <div id="build-options"></div>
     </div>
 

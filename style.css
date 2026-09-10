@@ -120,13 +120,16 @@ html,body{
 /* ---------- KARTENOPTIONEN ---------- */
 #setup-screen{
   width:100%;
-  height:100vh;
+  height:100%;
   display:flex;
   flex-direction:column;
   align-items:center;
-  justify-content:center;
+  justify-content:flex-start;
   background:radial-gradient(ellipse at center, #16233d 0%, #0a0e14 75%);
   text-align:center;
+  overflow-y:auto;
+  padding:28px 16px 40px 16px;
+  box-sizing:border-box;
 }
 
 .setup-title{
@@ -134,7 +137,18 @@ html,body{
   font-size:22px;
   color:var(--gold);
   letter-spacing:2px;
-  margin-bottom:30px;
+  margin-bottom:24px;
+  flex:0 0 auto;
+}
+
+/* Ordnet die Options-Gruppen nebeneinander an, wenn der Platz reicht, und bricht
+   auf schmalen/kurzen Bildschirmen automatisch in mehrere Zeilen um. */
+.setup-grid{
+  display:flex;
+  flex-wrap:wrap;
+  justify-content:center;
+  gap:8px 36px;
+  max-width:960px;
 }
 
 .setup-group{
@@ -142,7 +156,7 @@ html,body{
   flex-direction:column;
   align-items:center;
   gap:10px;
-  margin-bottom:22px;
+  margin-bottom:18px;
 }
 
 .setup-label{
@@ -393,6 +407,32 @@ html,body{
   height:12px;
   background:#0a0e14;
   border:1px solid var(--panel-border);
+}
+
+#build-rally-row{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  margin:10px 12px 0 12px;
+  padding-bottom:10px;
+  border-bottom:1px solid var(--panel-border);
+  font-size:15px;
+  color:#8a93a8;
+}
+
+#build-rally-row button{
+  font-family:'VT323', monospace;
+  font-size:15px;
+  padding:4px 10px;
+  background:#1c2740;
+  border:1px solid var(--panel-border);
+  color:var(--text);
+  cursor:pointer;
+}
+
+#build-rally-row button:hover{
+  border-color:var(--gold);
 }
 
 #build-progress-bar{
