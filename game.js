@@ -9,36 +9,48 @@
    Rasten/Warten/Befestigen-Stationsbefehle.
    ========================================================= */
 
-/* ---------- AUDIO: prozeduraler Chiptune-Loop ---------- */
+/* ---------- AUDIO: "In der Halle des Bergkönigs" (Edvard Grieg, Peer Gynt) ----------
+   Eigene, freie Rekonstruktion im Web-Audio-Stil, keine Audiodatei nötig (Grieg ist seit
+   Langem gemeinfrei). Nachgebildet ist das strukturelle Kernprinzip des Stücks: ein
+   simples, schrittweise auf- und absteigendes Motiv in h-Moll, das bei jeder Wiederholung
+   eine Stufe höher transponiert wird und dabei schneller und lauter wird, bis zum
+   schnellen, lauten Höhepunkt — danach beginnt der Zyklus wieder leise von vorn. Die
+   genaue Melodieführung ist eine Annäherung aus dem Gedächtnis, kein Notenzitat. */
 const MusicEngine = (() => {
   let ctx = null;
   let playing = false;
   let muted = false;
-  let nextNoteTime = 0;
-  let noteIndex = 0;
 
-  const bassLine = [98.00, 98.00, 110.00, 87.31, 98.00, 98.00, 73.42, 82.41];
-  const melody = [
-    392.00, 466.16, 523.25, 466.16, 392.00, 349.23, 392.00, 0,
-    440.00, 523.25, 587.33, 523.25, 440.00, 392.00, 440.00, 0
+  const N = {
+    B3:246.94, CS4:277.18, D4:293.66, E4:329.63, FS4:369.99, G4:392.00, A4:440.00,
+    B4:493.88, CS5:554.37, D5:587.33, E5:659.25, FS5:739.99
+  };
+
+  // Dasselbe 16-Noten-Motiv, für 5 Steigerungsrunden transponiert.
+  const ROUNDS = [
+    ['B3','CS4','D4','E4','FS4','G4','FS4','E4','D4','E4','FS4','G4','A4','B4','A4','G4'],
+    ['CS4','D4','E4','FS4','G4','A4','G4','FS4','E4','FS4','G4','A4','B4','CS5','B4','A4'],
+    ['D4','E4','FS4','G4','A4','B4','A4','G4','FS4','G4','A4','B4','CS5','D5','CS5','B4'],
+    ['E4','FS4','G4','A4','B4','CS5','B4','A4','G4','A4','B4','CS5','D5','E5','D5','CS5'],
+    ['FS4','G4','A4','B4','CS5','D5','CS5','B4','A4','B4','CS5','D5','E5','FS5','E5','D5']
   ];
-  const tempo = 0.16;
+  const TEMPO = [0.34, 0.27, 0.21, 0.16, 0.115];
+  const GAIN  = [0.045, 0.06, 0.085, 0.12, 0.17];
+
+  let roundIndex = 0, noteIndex = 0, nextNoteTime = 0;
 
   function ensureCtx(){
-    if(!ctx){
-      ctx = new (window.AudioContext || window.webkitAudioContext)();
-    }
+    if(!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
     if(ctx.state === 'suspended') ctx.resume();
   }
 
-  function playTone(freq, time, dur, type, gainVal){
-    if(freq <= 0) return;
+  function playTone(freq, time, dur, gainVal, type){
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = type;
     osc.frequency.setValueAtTime(freq, time);
     gain.gain.setValueAtTime(0, time);
-    gain.gain.linearRampToValueAtTime(gainVal, time + 0.01);
+    gain.gain.linearRampToValueAtTime(gainVal, time + 0.015);
     gain.gain.exponentialRampToValueAtTime(0.001, time + dur);
     osc.connect(gain);
     gain.connect(ctx.destination);
@@ -47,15 +59,22 @@ const MusicEngine = (() => {
   }
 
   function scheduler(){
-    while(nextNoteTime < ctx.currentTime + 0.2){
+    while(nextNoteTime < ctx.currentTime + 0.25){
       if(!muted){
-        const bassFreq = bassLine[noteIndex % bassLine.length];
-        const melFreq = melody[noteIndex % melody.length];
-        playTone(bassFreq, nextNoteTime, tempo * 0.9, 'triangle', 0.09);
-        playTone(melFreq, nextNoteTime, tempo * 0.8, 'square', 0.045);
+        const round = ROUNDS[roundIndex];
+        const freq = N[round[noteIndex]];
+        const dur = TEMPO[roundIndex];
+        const gainVal = GAIN[roundIndex];
+        playTone(freq, nextNoteTime, dur*0.95, gainVal, 'triangle');       // Fagott-artige Melodie
+        playTone(freq/2, nextNoteTime, dur*0.9, gainVal*0.5, 'sawtooth');  // tiefe Begleitstimme
+        if(roundIndex===ROUNDS.length-1) playTone(freq*2, nextNoteTime, dur*0.8, gainVal*0.4, 'square'); // voller Klang im Finale
       }
-      nextNoteTime += tempo;
+      nextNoteTime += TEMPO[roundIndex];
       noteIndex++;
+      if(noteIndex >= ROUNDS[roundIndex].length){
+        noteIndex = 0;
+        roundIndex = (roundIndex + 1) % ROUNDS.length;
+      }
     }
     setTimeout(scheduler, 50);
   }
@@ -87,11 +106,13 @@ const DIRS4 = [[1,0],[-1,0],[0,1],[0,-1]];
 const SIZE_PRESETS = {
   small:  { cols:36, rows:24 },
   medium: { cols:52, rows:34 },
-  large:  { cols:68, rows:44 }
+  large:  { cols:68, rows:44 },
+  huge:   { cols:136, rows:88 } // vierfache Fläche von "Groß"
 };
 const CITY_TILES_PER_CITY = { sparse:70, normal:44, dense:28 };
 
-let mapConfig = { size:'medium', landform:'continent', cities:'normal', aiCount:1 };
+let mapConfig = { size:'medium', landform:'continent', cities:'normal', aiCount:1, fogOfWar:'off' };
+let fogEnabled = false;
 
 const T_PLAIN = 'plain';
 const T_FOREST = 'forest';
@@ -99,8 +120,10 @@ const T_HILLS = 'hills';
 const T_MOUNTAIN = 'mountain';
 const T_WATER = 'water';
 const T_CITY = 'city';
+const T_AIRPORT = 'airport';
 
-const MOVE_COST = { [T_PLAIN]:1, [T_FOREST]:2, [T_HILLS]:2, [T_MOUNTAIN]:3, [T_WATER]:1, [T_CITY]:1 };
+const MOVE_COST = { [T_PLAIN]:1, [T_FOREST]:2, [T_HILLS]:2, [T_MOUNTAIN]:3, [T_WATER]:1, [T_CITY]:1, [T_AIRPORT]:1 };
+const SIGHT_RANGE = { ground:2, air:4 };
 
 /* ---------- KONSTANTEN: SPIELER ---------- */
 const OWNER_PLAYER = 'player';
@@ -170,6 +193,8 @@ let unloadingCargoUnit = null;
 let gameOver = false;
 let selectedBuildCity = null;
 let awaitingWaypointClick = false;
+let awaitingPatrolStep = 0; // 0=inaktiv, 1=wartet auf Punkt A, 2=wartet auf Punkt B
+let patrolPointA = null;
 let dragPreviewTarget = null;
 
 const camera = { x:0, y:0, zoom:1 };
@@ -484,6 +509,7 @@ function spawnUnit(owner, type, x, y){
     subLevel: stats.subclass==='sea' && type==='submarine' ? 'surface' : null,
     orderState: null,          // null | 'resting' | 'waiting'
     destination: null,         // {x,y} Wegpunkt-Marschziel
+    patrol: null,              // {a:{x,y}, b:{x,y}, target:'a'|'b'} Patrouillenbefehl
     effectiveness: EXPERIENCE_CAP.green,
     experience: 'green',
     xpWins: 0,
@@ -723,10 +749,46 @@ function captureCity(x,y, owner, capturingUnit){
   }
 }
 
+// Unbesetzte Städte verteidigen sich wie eine Infanterie-Einheit ("natürliche Verteidigung").
+// Gibt zurück, ob der Angreifer den Kampf überlebt hat.
+function resolveCityDefenseCombat(attacker){
+  const virtualDefender = { type:'infantry', hp:UNIT_STATS.infantry.hp, effectiveness:EXPERIENCE_CAP.green, dugIn:false };
+  const attackerCrippled = isCrippled(attacker);
+  let rounds = 0;
+  while(attacker.hp>0 && virtualDefender.hp>0 && rounds<200){
+    rounds++;
+    const chance = hitChance(attacker, virtualDefender, attackerCrippled);
+    const roll = Math.random()*100;
+    if(roll < chance) virtualDefender.hp -= UNIT_STATS[attacker.type].dmg;
+    else attacker.hp -= UNIT_STATS.infantry.dmg;
+  }
+  if(virtualDefender.hp <= 0) return true;
+  destroyUnit(attacker);
+  return false;
+}
+
+// Versucht, eine unbesetzte gegnerische/neutrale Stadt oder einen Flughafen zu übernehmen
+// (Flughäfen ohne eigene Verteidigung, Städte mit virtuellem Infanterie-Kampf).
+// Gibt zurück, ob der Angreifer den Vorgang überlebt hat.
+function tryCaptureStructure(unit, x, y){
+  const tile = map[y][x];
+  if(tile.type===T_AIRPORT && tile.owner!==unit.owner){
+    tile.owner = unit.owner;
+    return true;
+  }
+  if(tile.type===T_CITY && tile.owner!==unit.owner){
+    const survived = resolveCityDefenseCombat(unit);
+    MusicEngine.start();
+    if(survived) captureCity(x, y, unit.owner, unit);
+    return survived;
+  }
+  return true;
+}
+
 function refuelIfOnOwnCity(u){
   if(u.type !== 'fighter') return;
   const tile = map[u.y][u.x];
-  if(tile.type===T_CITY && tile.owner===u.owner) u.fuel = UNIT_STATS.fighter.fuel;
+  if((tile.type===T_CITY || tile.type===T_AIRPORT) && tile.owner===u.owner) u.fuel = UNIT_STATS.fighter.fuel;
 }
 
 /* ---------- WER DARF WEN ANGREIFEN (Welt-Ebenen-Priorität) ---------- */
@@ -794,8 +856,8 @@ function advanceWaypoint(unit){
     unit.actedAtAll = true;
     refuelIfOnOwnCity(unit);
     const tile = map[step.y][step.x];
-    if(tile.type===T_CITY && tile.owner!==unit.owner && stats.subclass==='land'){
-      captureCity(step.x, step.y, unit.owner, unit);
+    if((tile.type===T_CITY || tile.type===T_AIRPORT) && tile.owner!==unit.owner && stats.subclass==='land'){
+      if(!tryCaptureStructure(unit, step.x, step.y)) return; // Einheit an Stadtverteidigung gescheitert
     }
     // Adjazenter Feind nach dem Schritt -> ebenfalls abbrechen (Feindkontakt)
     if(adjacentTiles(unit.x,unit.y).some(t => pickDefenderAt(t.x,t.y,unit))){
@@ -806,10 +868,56 @@ function advanceWaypoint(unit){
   if(unit.movesLeft<=0) unit.moved = true;
 }
 
+// Patrouille: pendelt selbständig zwischen zwei Wegpunkten (A/B), bricht wie ein
+// Marschbefehl bei Feindkontakt ab.
+function advancePatrol(unit){
+  if(!unit.patrol || unit.moved || unit.hp<=0) return;
+  const stats = UNIT_STATS[unit.type];
+  let guard = 0;
+  while(unit.patrol && unit.movesLeft>0 && guard<50){
+    guard++;
+    const tgt = unit.patrol[unit.patrol.target];
+    if(unit.x===tgt.x && unit.y===tgt.y){
+      unit.patrol.target = unit.patrol.target==='a' ? 'b' : 'a';
+      continue;
+    }
+    const path = computePathTowards(unit, tgt);
+    if(!path || path.length===0){
+      updateInfoPanel(`${ownerLabel(unit.owner)}: Patrouille abgebrochen — kein Weg zum Wegpunkt.`);
+      unit.patrol = null;
+      break;
+    }
+    const step = path[0];
+    const def = pickDefenderAt(step.x, step.y, unit);
+    if(def){
+      updateInfoPanel(`${ownerLabel(unit.owner)}: Einheit auf Patrouille hat Feindkontakt — Befehl unterbrochen.`);
+      unit.patrol = null;
+      break;
+    }
+    const cost = terrainCost(map[step.y][step.x], unit);
+    if(cost > unit.movesLeft) break;
+    unit.movesLeft -= cost;
+    unit.x = step.x; unit.y = step.y;
+    unit.actedAtAll = true;
+    refuelIfOnOwnCity(unit);
+    const tile = map[step.y][step.x];
+    if((tile.type===T_CITY || tile.type===T_AIRPORT) && tile.owner!==unit.owner && stats.subclass==='land'){
+      if(!tryCaptureStructure(unit, step.x, step.y)) return;
+    }
+    if(adjacentTiles(unit.x,unit.y).some(t => pickDefenderAt(t.x,t.y,unit))){
+      unit.patrol = null;
+      break;
+    }
+  }
+  if(unit.movesLeft<=0) unit.moved = true;
+}
+
 /* ---------- SPIELERZUG: AUSWAHL & HIGHLIGHTS ---------- */
 function selectUnit(u){
-  if(u.orderState){
+  if(u.orderState || ((u.destination || u.patrol) && u.moved)){
     u.orderState = null;
+    u.destination = null;
+    u.patrol = null;
     u.moved = false;
     const s = UNIT_STATS[u.type];
     u.movesLeft = isCrippled(u) ? Math.max(1, Math.floor(s.move/2)) : s.move;
@@ -842,7 +950,7 @@ function selectUnit(u){
       }
       const tile = map[t.y][t.x];
       const occ = unitsAt(t.x,t.y);
-      if(occ.length===0 && tile.type===T_CITY && tile.owner!==u.owner && stats.subclass==='land'){
+      if(occ.length===0 && (tile.type===T_CITY || tile.type===T_AIRPORT) && tile.owner!==u.owner && stats.subclass==='land'){
         attackableTiles.push(t);
         seenAttack.add(tk);
       }
@@ -865,7 +973,32 @@ function selectUnit(u){
 
   renderUnitActions();
   updateSelectionInfo();
+  centerCameraOn(u.x*BASE_TILE+BASE_TILE/2, u.y*BASE_TILE+BASE_TILE/2);
   render();
+}
+
+// Nächste eigene Einheit, die noch keinen Befehl für diese Runde hat (Bewegung/Angriff
+// noch möglich, kein Rasten/Warten). Zyklisch nach ID sortiert, damit übersprungene
+// Einheiten (der Spieler wählte manuell eine andere) später wieder drankommen.
+function findNextIdleUnit(afterId){
+  const list = unitsOf(OWNER_PLAYER).filter(u => !u.moved && !u.orderState).sort((a,b)=>a.id-b.id);
+  if(list.length===0) return null;
+  if(afterId==null) return list[0];
+  const idx = list.findIndex(u=>u.id>afterId);
+  return idx>=0 ? list[idx] : list[0];
+}
+
+// Schließt die Aktion einer Einheit ab und wählt automatisch die nächste unerledigte
+// Einheit des Spielers aus (falls noch eine übrig ist).
+function finishUnitTurn(unit){
+  const finishedId = unit ? unit.id : null;
+  deselect();
+  checkGameOver();
+  updateHud();
+  if(!gameOver && currentTurnOwner===OWNER_PLAYER){
+    const next = findNextIdleUnit(finishedId);
+    if(next) selectUnit(next);
+  }
 }
 
 function updateSelectionInfo(){
@@ -878,7 +1011,8 @@ function updateSelectionInfo(){
   if(u.subLevel==='deep') parts.push('Getaucht');
   if(u.cargo && u.cargo.length) parts.push(`Fracht ${u.cargo.length}/${s.portageCapacity}`);
   if(u.destination) parts.push('Marschbefehl aktiv');
-  updateInfoPanel(parts.join(' | ') + '. Blau=Bewegen, Rot=Angriff/Erobern, Orange=Fernkampf. [G]=Marschziel, [R]asten [W]arten [B]efestigen.');
+  if(u.patrol) parts.push('Patrouille aktiv');
+  updateInfoPanel(parts.join(' | ') + '. Blau=Bewegen, Rot=Angriff/Erobern, Orange=Fernkampf. [G]=Marschziel, [P]atrouille, [R]asten [W]arten [B]efestigen.');
 }
 
 function deselect(){
@@ -889,6 +1023,8 @@ function deselect(){
   unloadTiles = [];
   unloadingCargoUnit = null;
   awaitingWaypointClick = false;
+  awaitingPatrolStep = 0;
+  patrolPointA = null;
   renderUnitActions();
   render();
 }
@@ -914,18 +1050,34 @@ function renderUnitActions(){
     updateInfoPanel('Zielpunkt auf der Karte anklicken (auch außerhalb der Reichweite)...');
   }, awaitingWaypointClick);
 
+  addBtn('🔁 Patrouille [P]', () => {
+    awaitingPatrolStep = 1;
+    patrolPointA = null;
+    updateInfoPanel('Patrouille: ersten Wegpunkt anklicken...');
+  }, awaitingPatrolStep>0);
+
   addBtn('💤 Rasten [R]', () => commandOrderState(u, 'resting'));
   addBtn('⏸ Warten [W]', () => commandOrderState(u, 'waiting'));
 
   if(s.canDigIn && !u.dugIn && u.digPending!=='in'){
     addBtn('⛏ Befestigen [B]', () => commandFortify(u));
   }
+  if(u.type==='infantry' && [T_PLAIN,T_FOREST,T_HILLS].includes(map[u.y][u.x].type)){
+    addBtn('🛬 Flughafen bauen', () => {
+      const tile = map[u.y][u.x];
+      tile.type = T_AIRPORT;
+      tile.owner = u.owner;
+      updateInfoPanel('Flughafen errichtet — die Infanterie wurde dabei aufgelöst.');
+      destroyUnit(u);
+      finishUnitTurn(u);
+    });
+  }
   if(u.dugIn){
     addBtn('⛏ Ausgraben', () => {
       u.digPending = 'out';
       u.moved = true; u.movesLeft = 0; u.actedAtAll = true;
       updateInfoPanel('Gräbt sich aus — nächste Runde wieder beweglich.');
-      deselect(); updateHud();
+      finishUnitTurn(u);
     });
   }
   if(s.range > 0 && rangedTiles.length>0){
@@ -937,14 +1089,14 @@ function renderUnitActions(){
         u.subLevel = 'deep';
         u.moved = true; u.movesLeft = 0; u.actedAtAll = true;
         updateInfoPanel('U-Boot taucht ab — nur noch von Boden-/U-Boot-Einheiten angreifbar.');
-        deselect(); updateHud();
+        finishUnitTurn(u);
       });
     } else {
       addBtn('⬆ Auftauchen', () => {
         u.subLevel = 'surface';
         u.moved = true; u.movesLeft = 0; u.actedAtAll = true;
         updateInfoPanel('U-Boot taucht auf.');
-        deselect(); updateHud();
+        finishUnitTurn(u);
       });
     }
   }
@@ -961,14 +1113,14 @@ function commandOrderState(u, state){
   u.orderState = state;
   u.moved = true; u.movesLeft = 0;
   updateInfoPanel(`${UNIT_STATS[u.type].name} ${state==='resting' ? 'rastet' : 'wartet'} — bei Feindkontakt reaktiviert${state==='resting' ? ', heilt in Städten vollständig aus' : ''}.`);
-  deselect(); updateHud();
+  finishUnitTurn(u);
 }
 
 function commandFortify(u){
   u.digPending = 'in';
   u.moved = true; u.movesLeft = 0; u.actedAtAll = true;
   updateInfoPanel('Gräbt sich ein — wird nächste Runde wirksam und bleibt auch bei Feindkontakt befestigt.');
-  deselect(); updateHud();
+  finishUnitTurn(u);
 }
 
 function startUnload(hostUnit, cargoUnit){
@@ -1097,6 +1249,7 @@ window.addEventListener('keydown', (evt) => {
     if(k==='w' || k==='W'){ commandOrderState(selectedUnit, 'waiting'); return; }
     if((k==='b' || k==='B') && UNIT_STATS[selectedUnit.type].canDigIn && !selectedUnit.dugIn){ commandFortify(selectedUnit); return; }
     if(k==='g' || k==='G'){ awaitingWaypointClick = true; updateInfoPanel('Zielpunkt auf der Karte anklicken...'); renderUnitActions(); return; }
+    if(k==='p' || k==='P'){ awaitingPatrolStep = 1; patrolPointA = null; updateInfoPanel('Patrouille: ersten Wegpunkt anklicken...'); renderUnitActions(); return; }
   }
   if(k==='ArrowLeft'){ camera.x -= panStep; clampCamera(); render(); }
   else if(k==='ArrowRight'){ camera.x += panStep; clampCamera(); render(); }
@@ -1132,6 +1285,30 @@ function handleGameClick(sx, sy){
     return;
   }
 
+  // Patrouillen-Modus (Taste P oder Aktionsleiste): zwei Wegpunkte nacheinander wählen
+  if(awaitingPatrolStep>0 && selectedUnit){
+    const pStats = UNIT_STATS[selectedUnit.type];
+    const pTile = map[y][x];
+    if(pStats.category==='air' && (![T_CITY,T_AIRPORT].includes(pTile.type) || pTile.owner!==selectedUnit.owner)){
+      updateInfoPanel('Flugzeuge müssen an einer EIGENEN Stadt oder einem Flughafen patrouillieren.');
+      return;
+    }
+    if(awaitingPatrolStep===1){
+      patrolPointA = {x,y};
+      awaitingPatrolStep = 2;
+      updateInfoPanel('Patrouille: zweiten Wegpunkt anklicken...');
+      return;
+    }
+    awaitingPatrolStep = 0;
+    selectedUnit.patrol = { a: patrolPointA, b: {x,y}, target: 'b' };
+    selectedUnit.destination = null;
+    patrolPointA = null;
+    updateInfoPanel('Patrouille eingerichtet — Einheit pendelt selbständig zwischen beiden Punkten.');
+    renderUnitActions();
+    render();
+    return;
+  }
+
   // Entlade-Modus
   if(unloadingCargoUnit){
     if(unloadTiles.some(t=>t.x===x && t.y===y)){
@@ -1142,7 +1319,9 @@ function handleGameClick(sx, sy){
       host.cargo = host.cargo.filter(id=>id!==cargo.id);
       updateInfoPanel(`${UNIT_STATS[cargo.type].name} entladen.`);
       unloadingCargoUnit = null; unloadTiles = [];
+      const stillThere = units.includes(host) && !host.moved;
       deselect();
+      if(stillThere) selectUnit(host);
       checkGameOver(); updateHud();
       return;
     }
@@ -1174,8 +1353,7 @@ function handleGameClick(sx, sy){
         const res = resolveRangedAttack(selectedUnit, def.target);
         MusicEngine.start();
         updateInfoPanel(res.destroyed ? 'Ziel durch Fernkampf zerstört!' : (res.hitAny ? 'Treffer, Ziel überlebt.' : 'Fernkampf verfehlt.'));
-        deselect();
-        checkGameOver(); updateHud();
+        finishUnitTurn(selectedUnit);
         return;
       }
     }
@@ -1186,28 +1364,36 @@ function handleGameClick(sx, sy){
         const res = resolveMeleeAttack(selectedUnit, def.target, def.noEntry);
         MusicEngine.start();
         if(res.winner==='attacker'){
-          if(res.entered){
+          const destTile = map[y][x];
+          // Landeinheiten dürfen Wassereinheiten (und umgekehrt Schiffe Landfelder) nie
+          // tatsächlich betreten, auch wenn sie den Kampf gewinnen — Angriff ja, Einzug nein.
+          const canEnter = res.entered && terrainAllowed(destTile, selectedUnit);
+          if(canEnter){
             selectedUnit.x = x; selectedUnit.y = y;
-            const destTile = map[y][x];
-            if(destTile.type===T_CITY && destTile.owner!==selectedUnit.owner && stats.subclass==='land'){
-              captureCity(x,y, selectedUnit.owner, selectedUnit);
+            if((destTile.type===T_CITY || destTile.type===T_AIRPORT) && destTile.owner!==selectedUnit.owner && stats.subclass==='land'){
+              if(destTile.type===T_AIRPORT) destTile.owner = selectedUnit.owner;
+              else captureCity(x,y, selectedUnit.owner, selectedUnit);
             }
             updateInfoPanel('Gegner besiegt, Feld eingenommen!');
           } else {
-            updateInfoPanel('Luftziel zerstört — Feld bleibt umkämpft.');
+            updateInfoPanel('Gegner besiegt — Einheit bleibt auf ihrem Feld.');
           }
           if(units.includes(selectedUnit)){ selectedUnit.moved = true; selectedUnit.movesLeft = 0; selectedUnit.actedAtAll = true; }
         } else {
           updateInfoPanel('Eigene Einheit im Kampf verloren!');
         }
       } else {
-        selectedUnit.x = x; selectedUnit.y = y;
-        captureCity(x,y, selectedUnit.owner, selectedUnit);
-        updateInfoPanel('Stadt erobert!');
+        const survived = tryCaptureStructure(selectedUnit, x, y);
+        const capturedType = map[y][x].type;
+        if(survived){
+          selectedUnit.x = x; selectedUnit.y = y;
+          updateInfoPanel(capturedType===T_AIRPORT ? 'Flughafen erobert!' : 'Stadt erobert!');
+        } else {
+          updateInfoPanel('Angriff auf die Stadtverteidigung gescheitert — Einheit verloren!');
+        }
         if(units.includes(selectedUnit)){ selectedUnit.moved = true; selectedUnit.movesLeft = 0; selectedUnit.actedAtAll = true; }
       }
-      deselect();
-      checkGameOver(); updateHud();
+      finishUnitTurn(selectedUnit);
       return;
     }
 
@@ -1220,6 +1406,7 @@ function handleGameClick(sx, sy){
       selectedUnit.movesLeft = Math.max(0, selectedUnit.movesLeft - costUsed);
       selectedUnit.actedAtAll = true;
       if(selectedUnit.movesLeft<=0) selectedUnit.moved = true;
+      if(selectedUnit.destination) selectedUnit.destination = null;
 
       if(hostAtDest && hostAtDest.cargo.length < UNIT_STATS[hostAtDest.type].portageCapacity){
         selectedUnit.hostId = hostAtDest.id;
@@ -1230,10 +1417,12 @@ function handleGameClick(sx, sy){
       } else {
         selectedUnit.x = x; selectedUnit.y = y;
         const destTile = map[y][x];
-        if(destTile.type===T_CITY && destTile.owner!==selectedUnit.owner){
+        if((destTile.type===T_CITY || destTile.type===T_AIRPORT) && destTile.owner!==selectedUnit.owner){
           if(stats.subclass==='land'){
-            captureCity(x,y, selectedUnit.owner, selectedUnit);
-            updateInfoPanel('Stadt erobert!');
+            const survived = tryCaptureStructure(selectedUnit, x, y);
+            updateInfoPanel(survived
+              ? (destTile.type===T_AIRPORT ? 'Flughafen erobert!' : 'Stadt erobert!')
+              : 'Angriff auf die Stadtverteidigung gescheitert — Einheit verloren!');
           } else {
             updateInfoPanel('Angelegt – nur Landeinheiten erobern Städte.');
           }
@@ -1244,18 +1433,22 @@ function handleGameClick(sx, sy){
       }
       const movedUnit = selectedUnit;
       const stillSelectable = units.includes(movedUnit) && !movedUnit.moved;
-      deselect();
-      if(stillSelectable) selectUnit(movedUnit);
-      checkGameOver(); updateHud();
+      if(stillSelectable){
+        deselect();
+        selectUnit(movedUnit);
+        checkGameOver(); updateHud();
+      } else {
+        finishUnitTurn(movedUnit);
+      }
       return;
     }
 
-    const clicked = unitsAt(x,y).find(u=>u.owner===OWNER_PLAYER && (!u.moved || u.orderState));
+    const clicked = unitsAt(x,y).find(u=>u.owner===OWNER_PLAYER && (!u.moved || u.orderState || u.destination || u.patrol));
     if(clicked) selectUnit(clicked); else deselect();
     return;
   }
 
-  const clicked = unitsAt(x,y).find(u=>u.owner===OWNER_PLAYER && (!u.moved || u.orderState));
+  const clicked = unitsAt(x,y).find(u=>u.owner===OWNER_PLAYER && (!u.moved || u.orderState || u.destination || u.patrol));
   if(clicked) selectUnit(clicked);
 }
 
@@ -1398,7 +1591,7 @@ function processFuel(owner){
     }
     if(f.hostId) continue;
     const tile = map[f.y][f.x];
-    if(tile.type===T_CITY && tile.owner===owner){
+    if((tile.type===T_CITY || tile.type===T_AIRPORT) && tile.owner===owner){
       f.fuel = UNIT_STATS.fighter.fuel;
     } else {
       f.fuel -= 1;
@@ -1418,7 +1611,7 @@ function processEndOfTurnUnitState(owner){
       const cap = EXPERIENCE_CAP[u.experience];
       u.effectiveness = Math.max(cap, u.effectiveness-1);
       const tile = map[u.y][u.x];
-      if(tile.type===T_CITY && tile.owner===owner && u.hp < s.hp){
+      if((tile.type===T_CITY || tile.type===T_AIRPORT) && tile.owner===owner && u.hp < s.hp){
         u.hp = s.hp;
       }
     }
@@ -1498,8 +1691,11 @@ function advanceTurn(){
   if(currentTurnOwner === OWNER_PLAYER){
     processOrderStates(OWNER_PLAYER);
     for(const u of unitsOf(OWNER_PLAYER)) advanceWaypoint(u);
+    for(const u of unitsOf(OWNER_PLAYER)) advancePatrol(u);
     updateHud();
-    updateInfoPanel(`Runde ${turnNumber} — Du bist am Zug.`);
+    const next = findNextIdleUnit(null);
+    if(next) selectUnit(next);
+    else updateInfoPanel(`Runde ${turnNumber} — Du bist am Zug. Keine Einheiten mit offenen Befehlen.`);
     render();
     return;
   }
@@ -1593,19 +1789,21 @@ function aiActUnit(unit){
     if(def && def.target.owner!==unit.owner){
       const res = resolveMeleeAttack(unit, def.target, def.noEntry);
       MusicEngine.start();
-      if(res.winner==='attacker' && res.entered){
+      if(res.winner==='attacker' && res.entered && terrainAllowed(map[a.y][a.x], unit)){
         unit.x=a.x; unit.y=a.y;
         const t=map[a.y][a.x];
-        if(t.type===T_CITY && t.owner!==unit.owner && stats.subclass==='land') captureCity(a.x,a.y,unit.owner,unit);
+        if((t.type===T_CITY || t.type===T_AIRPORT) && t.owner!==unit.owner && stats.subclass==='land'){
+          if(t.type===T_AIRPORT) t.owner = unit.owner; else captureCity(a.x,a.y,unit.owner,unit);
+        }
       }
       unit.moved = true; unit.movesLeft = 0;
       return;
     }
     const tile = map[a.y][a.x];
-    if(unitsAt(a.x,a.y).length===0 && tile.type===T_CITY && tile.owner!==unit.owner && stats.subclass==='land'){
-      unit.x=a.x; unit.y=a.y;
-      captureCity(a.x,a.y, unit.owner, unit);
-      unit.moved = true; unit.movesLeft = 0;
+    if(unitsAt(a.x,a.y).length===0 && (tile.type===T_CITY || tile.type===T_AIRPORT) && tile.owner!==unit.owner && stats.subclass==='land'){
+      const survived = tryCaptureStructure(unit, a.x, a.y);
+      if(survived){ unit.x=a.x; unit.y=a.y; }
+      if(units.includes(unit)){ unit.moved = true; unit.movesLeft = 0; }
       return;
     }
   }
@@ -1621,10 +1819,12 @@ function aiActUnit(unit){
       if(def.target.owner!==unit.owner){
         const res = resolveMeleeAttack(unit, def.target, def.noEntry);
         MusicEngine.start();
-        if(res.winner==='attacker' && res.entered){
+        if(res.winner==='attacker' && res.entered && terrainAllowed(map[step.y][step.x], unit)){
           unit.x=step.x; unit.y=step.y;
           const t=map[step.y][step.x];
-          if(t.type===T_CITY && t.owner!==unit.owner && stats.subclass==='land') captureCity(step.x, step.y, unit.owner, unit);
+          if((t.type===T_CITY || t.type===T_AIRPORT) && t.owner!==unit.owner && stats.subclass==='land'){
+            if(t.type===T_AIRPORT) t.owner = unit.owner; else captureCity(step.x, step.y, unit.owner, unit);
+          }
         }
       }
       unit.moved = true; unit.movesLeft = 0;
@@ -1636,8 +1836,8 @@ function aiActUnit(unit){
     unit.x = step.x; unit.y = step.y;
     refuelIfOnOwnCity(unit);
     const t = map[step.y][step.x];
-    if(t.type===T_CITY && t.owner!==unit.owner && stats.subclass==='land'){
-      captureCity(step.x, step.y, unit.owner, unit);
+    if((t.type===T_CITY || t.type===T_AIRPORT) && t.owner!==unit.owner && stats.subclass==='land'){
+      if(!tryCaptureStructure(unit, step.x, step.y)){ return; }
     }
   }
   unit.movesLeft = remaining;
@@ -1831,9 +2031,37 @@ const TILE_COLORS = {
 };
 const EFF_COLORS = { fresh:'#5ad65a', rested:'#5ad65a', ready:'#5ad65a', used:'#e0c04a', tired:'#e0c04a', exhausted:'#e0473f' };
 
+// Nebel des Krieges: einfache radiusbasierte Sicht (kein Line-of-Sight, keine
+// Geländeverdeckung) nur für die Spieler-Ansicht. Einmal erkundete Felder bleiben als
+// Terrain sichtbar (nur abgedunkelt), unerkundete Felder bleiben schwarz.
+let visibleSet = new Set();
+let exploredSet = new Set();
+
+function recomputeVisibility(){
+  if(!fogEnabled) return;
+  visibleSet = new Set();
+  const sources = [];
+  for(const u of unitsOf(OWNER_PLAYER)) sources.push({x:u.x, y:u.y, range: UNIT_STATS[u.type].category==='air' ? SIGHT_RANGE.air : SIGHT_RANGE.ground});
+  for(const c of citiesOf(OWNER_PLAYER)) sources.push({x:c.x, y:c.y, range: SIGHT_RANGE.ground});
+  for(const src of sources){
+    const r = src.range;
+    for(let dy=-r; dy<=r; dy++){
+      for(let dx=-r; dx<=r; dx++){
+        if(dx*dx+dy*dy > r*r+1) continue;
+        const nx=src.x+dx, ny=src.y+dy;
+        if(!inBounds(nx,ny)) continue;
+        const k = key(nx,ny);
+        visibleSet.add(k);
+        exploredSet.add(k);
+      }
+    }
+  }
+}
+
 function render(){
   if(map.length === 0) return;
   gctx.clearRect(0,0,gameCanvas.width, gameCanvas.height);
+  if(fogEnabled) recomputeVisibility();
 
   const tsz = BASE_TILE * camera.zoom;
   const startX = Math.max(0, Math.floor(camera.x / BASE_TILE) - 1);
@@ -1847,12 +2075,20 @@ function render(){
       const scr = worldToScreen(x*BASE_TILE, y*BASE_TILE);
       const px = scr.x, py = scr.y;
 
-      gctx.fillStyle = tile.type===T_CITY ? '#1b2436' : TILE_COLORS[tile.type];
+      if(fogEnabled && !exploredSet.has(key(x,y))){
+        gctx.fillStyle = '#05070a';
+        gctx.fillRect(px,py,tsz,tsz);
+        continue;
+      }
+      gctx.save();
+      if(fogEnabled && !visibleSet.has(key(x,y))) gctx.globalAlpha = 0.45;
+
+      gctx.fillStyle = (tile.type===T_CITY || tile.type===T_AIRPORT) ? '#1b2436' : TILE_COLORS[tile.type];
       gctx.fillRect(px,py,tsz,tsz);
       gctx.strokeStyle = 'rgba(0,0,0,0.25)';
       gctx.strokeRect(px,py,tsz,tsz);
 
-      if(tile.road && tile.type!==T_CITY){
+      if(tile.road && tile.type!==T_CITY && tile.type!==T_AIRPORT){
         gctx.strokeStyle = 'rgba(224,184,74,0.55)';
         gctx.lineWidth = Math.max(1, tsz*0.08);
         gctx.beginPath();
@@ -1899,7 +2135,19 @@ function render(){
           gctx.font = `${Math.floor(hs*0.7)}px monospace`;
           gctx.fillText('⚙', px+tsz-hs/2, py+hs/2+1);
         }
+      } else if(tile.type===T_AIRPORT){
+        const color = tile.owner ? (OWNER_COLORS[tile.owner] || OWNER_COLORS[OWNER_NEUTRAL]) : '#5a6478';
+        gctx.strokeStyle = color;
+        gctx.lineWidth = Math.max(2, tsz*0.06);
+        const pad = tsz*0.22;
+        gctx.strokeRect(px+pad, py+pad*0.7, tsz-2*pad, tsz-2*pad*0.7);
+        gctx.fillStyle = color;
+        gctx.font = `${Math.floor(tsz*0.4)}px sans-serif`;
+        gctx.textAlign = 'center';
+        gctx.textBaseline = 'middle';
+        gctx.fillText('✈', px+tsz/2, py+tsz/2+1);
       }
+      gctx.restore();
     }
   }
 
@@ -1948,6 +2196,7 @@ function render(){
   for(const u of units){
     if(u.hp<=0 || u.hostId) continue;
     if(u.x<startX-1 || u.x>endX+1 || u.y<startY-1 || u.y>endY+1) continue;
+    if(fogEnabled && u.owner!==OWNER_PLAYER && !visibleSet.has(key(u.x,u.y))) continue;
     drawUnit(u, tsz);
   }
 
@@ -2066,10 +2315,10 @@ function drawUnit(u, tsz){
     gctx.font = `${Math.floor(tsz*0.3)}px sans-serif`;
     gctx.fillText(u.orderState==='resting' ? '💤' : '⏸', cx, py+tsz*0.14);
   }
-  if(u.destination && tsz>20 && !u.orderState){
+  if((u.destination || u.patrol) && tsz>20 && !u.orderState){
     gctx.fillStyle = '#e0b84a';
     gctx.font = `${Math.floor(tsz*0.28)}px sans-serif`;
-    gctx.fillText('➤', cx, py+tsz*0.14);
+    gctx.fillText(u.patrol ? '🔁' : '➤', cx, py+tsz*0.14);
   }
 
   if(u.type==='fighter' && tsz>26){
@@ -2151,6 +2400,9 @@ function initGame(){
   turnOrder = [OWNER_PLAYER, ...aiOwners];
   turnIndex = 0;
   currentTurnOwner = OWNER_PLAYER;
+  fogEnabled = mapConfig.fogOfWar === 'on';
+  visibleSet = new Set();
+  exploredSet = new Set();
 
   units = [];
   unitIdCounter = 1;
@@ -2159,6 +2411,8 @@ function initGame(){
   reachableTiles = []; attackableTiles = []; rangedTiles = []; unloadTiles = [];
   unloadingCargoUnit = null;
   awaitingWaypointClick = false;
+  awaitingPatrolStep = 0;
+  patrolPointA = null;
   dragPreviewTarget = null;
   gameOver = false;
   minimapTerrainCanvas = null;
@@ -2180,7 +2434,12 @@ function initGame(){
   camera.zoom = 1;
   centerCameraOn(capitalSpots[0].x*BASE_TILE+BASE_TILE/2, capitalSpots[0].y*BASE_TILE+BASE_TILE/2);
   updateHud();
-  updateInfoPanel(`Runde 1 — ${aiOwners.length} Gegner. Wähle eine Einheit. Ziehen/[Pfeile]=Karte verschieben, Mausrad/[+/-]=Zoom, [G]=Marschziel, [R/W/B]=Rasten/Warten/Befestigen, [Leertaste]=Zug beenden.`);
+  const firstUnit = findNextIdleUnit(null);
+  if(firstUnit){
+    selectUnit(firstUnit);
+  } else {
+    updateInfoPanel(`Runde 1 — ${aiOwners.length} Gegner. Ziehen/[Pfeile]=Karte verschieben, Mausrad/[+/-]=Zoom, [G]=Marschziel, [P]atrouille, [R/W/B]=Rasten/Warten/Befestigen, [Leertaste]=Zug beenden.`);
+  }
   render();
 }
 

@@ -335,11 +335,15 @@ html,body{
   right:12px;
   top:12px;
   width:250px;
+  max-height:calc(100% - 24px);
+  display:flex;
+  flex-direction:column;
   background:var(--panel);
   border:2px solid var(--gold);
   box-shadow:4px 4px 0 rgba(0,0,0,0.4);
   z-index:5;
   font-size:18px;
+  overflow:hidden;
 }
 
 #unit-info-panel{
@@ -349,8 +353,8 @@ html,body{
 
 #unit-info-panel table{
   display:block;
-  max-height:60vh;
   overflow:auto;
+  flex:1;
 }
 
 .build-panel-header{
@@ -362,6 +366,7 @@ html,body{
   font-family:'Press Start 2P', monospace;
   font-size:11px;
   color:var(--gold);
+  flex:0 0 auto;
 }
 
 .build-panel-header button{
@@ -402,7 +407,8 @@ html,body{
   flex-direction:column;
   gap:6px;
   padding:10px 12px 12px 12px;
-  max-height:50vh;
+  flex:1 1 auto;
+  min-height:0;
   overflow-y:auto;
 }
 
