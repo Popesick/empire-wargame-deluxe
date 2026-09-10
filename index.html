@@ -20,6 +20,7 @@
   </div>
   <div class="menu">
     <button id="start-btn">▶ NEUES SPIEL</button>
+    <button id="load-btn-title">📂 LADEN</button>
     <button id="mute-btn">🔊 MUSIK AN</button>
   </div>
   <p class="hint">Erobere alle Städte des Gegners, bevor er deine Hauptstadt einnimmt.</p>
@@ -84,6 +85,19 @@
       <button class="setup-opt" data-value="on">An</button>
     </div>
   </div>
+
+  <div class="setup-group">
+    <span class="setup-label">Bewegungsanimation</span>
+    <div class="setup-options" data-group="animEnabled">
+      <button class="setup-opt active" data-value="on">An</button>
+      <button class="setup-opt" data-value="off">Aus</button>
+    </div>
+    <div id="anim-speed-row">
+      <span>Langsam</span>
+      <input type="range" id="anim-speed-slider" min="1" max="10" value="5">
+      <span>Schnell</span>
+    </div>
+  </div>
   </div>
 
   <p class="setup-hint">Inseln: Landmassen sind getrennt, Landeinheiten brauchen Schiffe zum Übersetzen (auch die KI). Keine Diplomatie — alle gegen alle.</p>
@@ -102,6 +116,7 @@
     </div>
     <div id="hud-center"></div>
     <div id="hud-right">
+      <button id="save-load-btn" title="Speichern / Laden">💾</button>
       <button id="info-btn" title="Einheiten-Übersicht">ℹ Einheiten</button>
       <button id="zoom-out-btn" title="Rauszoomen">－</button>
       <button id="zoom-in-btn" title="Reinzoomen">＋</button>
@@ -139,6 +154,15 @@
   </div>
   <div id="info-panel">Wähle eine Einheit aus, um sie zu bewegen oder anzugreifen.</div>
   <div id="unit-actions"></div>
+</div>
+
+<!-- SPEICHERN / LADEN -->
+<div id="save-load-panel" class="hidden">
+  <div class="go-box">
+    <h2 id="save-load-title">SPIELSTÄNDE</h2>
+    <div id="save-slots"></div>
+    <button id="save-load-close-btn">◀ Zurück</button>
+  </div>
 </div>
 
 <!-- GAME OVER OVERLAY -->

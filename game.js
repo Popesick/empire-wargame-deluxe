@@ -61,7 +61,8 @@ const SIZE_PRESETS = {
 };
 const CITY_TILES_PER_CITY = { sparse:70, normal:44, dense:28 };
 
-let mapConfig = { size:'medium', landform:'continent', landAmount:'normal', cities:'normal', aiCount:1, fogOfWar:'off' };
+let mapConfig = { size:'medium', landform:'continent', landAmount:'normal', cities:'normal', aiCount:1, fogOfWar:'off', animEnabled:'on' };
+let animSpeed = 5; // 1 (langsam) .. 10 (schnell)
 let fogEnabled = false;
 
 const T_PLAIN = 'plain';
@@ -138,6 +139,7 @@ let reachableTiles = [];
 let reachDist = {};
 let attackableTiles = [];
 let rangedTiles = [];
+let rangeRadiusTiles = []; // alle Felder innerhalb der Fernkampf-Reichweite, unabhängig von einem Ziel dort
 let unloadTiles = [];
 let unloadingCargoUnit = null;
 let gameOver = false;
@@ -206,6 +208,85 @@ function centerCameraOn(wx, wy){
 
 function inBounds(x,y){ return x>=0 && x<COLS && y>=0 && y<ROWS; }
 function activeOwners(){ return [OWNER_PLAYER, ...aiOwners]; }
+
+/* ---------- BEWEGUNGSANIMATION ---------- */
+// Rein kosmetisch: der Spielzustand hat die Einheit bereits an ihrer echten Zielposition,
+// hier wird nur ein kurzes Hingleiten von der alten zur neuen Position animiert.
+function animEnabledNow(){ return mapConfig.animEnabled !== 'off'; }
+function animDurationMs(){ return Math.round(700 - (animSpeed-1) * 58); } // Stufe 1≈700ms, Stufe 10≈178ms
+let animRafRunning = false;
+function ensureAnimLoop(){
+  if(animRafRunning) return;
+  animRafRunning = true;
+  function loop(){
+    render();
+    const stillAnimating = units.some(u => u._animFrom && (performance.now()-u._animStart < u._animDuration));
+    if(stillAnimating) requestAnimationFrame(loop);
+    else animRafRunning = false;
+  }
+  requestAnimationFrame(loop);
+}
+function queueMoveAnim(unit, fromX, fromY){
+  if(!animEnabledNow()) return;
+  if(fromX===unit.x && fromY===unit.y) return;
+  unit._animFrom = {x:fromX, y:fromY};
+  unit._animStart = performance.now();
+  unit._animDuration = animDurationMs();
+  ensureAnimLoop();
+}
+
+/* ---------- KAMPF-DARSTELLUNG (Sound + Blinken), nur bei Spieleraktionen ---------- */
+// Blockiert Eingaben kurz, damit man das Kampfgeschehen sehen kann, statt dass sofort
+// zur nächsten Einheit weitergesprungen wird.
+let inputLocked = false;
+let combatFx = null; // { a:{x,y,type,owner}, d:{x,y,type,owner}, blinkOn }
+
+const COMBAT_SOUND = {
+  fighter: 'audio/combat-aircraft.mp3',
+  helicopter: 'audio/combat-helicopter.mp3',
+  artillery: 'audio/combat-artillery.mp3',
+  infantry: 'audio/combat-infantry.mp3',
+  tank: 'audio/combat-infantry.mp3',
+  destroyer: 'audio/combat-naval.mp3',
+  transport: 'audio/combat-naval.mp3',
+  battleship: 'audio/combat-naval.mp3',
+  carrier: 'audio/combat-naval.mp3',
+  submarine: 'audio/combat-naval.mp3'
+};
+
+function playCombatSound(attackerType){
+  const src = COMBAT_SOUND[attackerType];
+  if(!src) return;
+  const sfx = new Audio(src);
+  sfx.volume = 0.75;
+  sfx.play().catch(()=>{});
+}
+
+// Zeigt eine kurze Kampf-Sequenz (2,5s Blinken + Sound, danach 1s Pause) und ruft erst
+// danach onDone() auf — nur für vom Spieler ausgelöste Kämpfe (siehe Aufrufer).
+function playCombatSequence(attackerSnap, defenderSnap, onDone){
+  inputLocked = true;
+  combatFx = { a: attackerSnap, d: defenderSnap, blinkOn: true };
+  playCombatSound(attackerSnap.type);
+  render();
+  const blinkTimer = setInterval(() => {
+    combatFx.blinkOn = !combatFx.blinkOn;
+    render();
+  }, 180);
+  setTimeout(() => {
+    clearInterval(blinkTimer);
+    combatFx = null;
+    render();
+    setTimeout(() => {
+      inputLocked = false;
+      onDone();
+    }, 1000);
+  }, 2600);
+}
+
+function snapshotUnit(u){
+  return { x:u.x, y:u.y, type:u.type, owner:u.owner };
+}
 
 /* ---------- KARTE GENERIEREN ---------- */
 function newTile(type){
@@ -816,6 +897,7 @@ function setDestination(unit, x, y, silent){
 function advanceWaypoint(unit){
   if(!unit.destination || unit.moved || unit.hp<=0) return;
   const stats = UNIT_STATS[unit.type];
+  const animFromX = unit.x, animFromY = unit.y;
   let guard = 0;
   while(unit.destination && unit.movesLeft>0 && guard<50){
     guard++;
@@ -841,7 +923,7 @@ function advanceWaypoint(unit){
     refuelIfOnOwnCity(unit);
     const tile = map[step.y][step.x];
     if((tile.type===T_CITY || tile.type===T_AIRPORT) && tile.owner!==unit.owner && stats.subclass==='land'){
-      if(!tryCaptureStructure(unit, step.x, step.y)) return; // Einheit an Stadtverteidigung gescheitert
+      if(!tryCaptureStructure(unit, step.x, step.y)){ queueMoveAnim(unit, animFromX, animFromY); return; } // Einheit an Stadtverteidigung gescheitert
     }
     // Adjazenter Feind nach dem Schritt -> ebenfalls abbrechen (Feindkontakt)
     if(adjacentTiles(unit.x,unit.y).some(t => pickDefenderAt(t.x,t.y,unit))){
@@ -850,6 +932,7 @@ function advanceWaypoint(unit){
     }
   }
   if(unit.movesLeft<=0) unit.moved = true;
+  queueMoveAnim(unit, animFromX, animFromY);
 }
 
 // Patrouille: pendelt selbständig zwischen zwei Wegpunkten (A/B), bricht wie ein
@@ -857,6 +940,7 @@ function advanceWaypoint(unit){
 function advancePatrol(unit){
   if(!unit.patrol || unit.moved || unit.hp<=0) return;
   const stats = UNIT_STATS[unit.type];
+  const animFromX = unit.x, animFromY = unit.y;
   let guard = 0;
   while(unit.patrol && unit.movesLeft>0 && guard<50){
     guard++;
@@ -886,7 +970,7 @@ function advancePatrol(unit){
     refuelIfOnOwnCity(unit);
     const tile = map[step.y][step.x];
     if((tile.type===T_CITY || tile.type===T_AIRPORT) && tile.owner!==unit.owner && stats.subclass==='land'){
-      if(!tryCaptureStructure(unit, step.x, step.y)) return;
+      if(!tryCaptureStructure(unit, step.x, step.y)){ queueMoveAnim(unit, animFromX, animFromY); return; }
     }
     if(adjacentTiles(unit.x,unit.y).some(t => pickDefenderAt(t.x,t.y,unit))){
       unit.patrol = null;
@@ -894,6 +978,7 @@ function advancePatrol(unit){
     }
   }
   if(unit.movesLeft<=0) unit.moved = true;
+  queueMoveAnim(unit, animFromX, animFromY);
 }
 
 /* ---------- SPIELERZUG: AUSWAHL & HIGHLIGHTS ---------- */
@@ -914,6 +999,7 @@ function selectUnit(u){
   reachDist = reach.dist;
   attackableTiles = [];
   rangedTiles = [];
+  rangeRadiusTiles = [];
   unloadTiles = [];
   const stats = UNIT_STATS[u.type];
 
@@ -949,6 +1035,7 @@ function selectUnit(u){
         if(Math.max(Math.abs(dx),Math.abs(dy)) > stats.range) continue;
         const nx=u.x+dx, ny=u.y+dy;
         if(!inBounds(nx,ny)) continue;
+        rangeRadiusTiles.push({x:nx,y:ny});
         const def = pickDefenderAt(nx,ny,u);
         if(def) rangedTiles.push({x:nx,y:ny});
       }
@@ -980,10 +1067,11 @@ function findNextIdleUnit(afterId){
   return idx>=0 ? list[idx] : list[0];
 }
 
-// TAB: zyklisch durch "inaktive" Einheiten (Rasten/Warten/Marschziel/Patrouille/
-// Befestigt) wechseln, damit man sie ohne Kartenklick kontrollieren/abbrechen kann.
+// TAB: zyklisch durch Einheiten mit laufendem Marschziel/Patrouille wechseln — also
+// "inaktive" Einheiten, die grundsätzlich noch handeln könnten. Rasten/Warten/Befestigt
+// sind bewusst ausgeschlossen: die wurden absichtlich geparkt, TAB soll nicht damit nerven.
 function findNextInactiveUnit(afterId){
-  const list = unitsOf(OWNER_PLAYER).filter(u => !isUnitPending(u) && (u.orderState || u.destination || u.patrol || u.dugIn)).sort((a,b)=>a.id-b.id);
+  const list = unitsOf(OWNER_PLAYER).filter(u => u.destination || u.patrol).sort((a,b)=>a.id-b.id);
   if(list.length===0) return null;
   if(afterId==null) return list[0];
   const idx = list.findIndex(u=>u.id>afterId);
@@ -1022,6 +1110,7 @@ function deselect(){
   reachableTiles = [];
   attackableTiles = [];
   rangedTiles = [];
+  rangeRadiusTiles = [];
   unloadTiles = [];
   unloadingCargoUnit = null;
   awaitingWaypointClick = false;
@@ -1141,7 +1230,7 @@ function startUnload(hostUnit, cargoUnit){
     if(!terrainAllowed(tile, cargoUnit)) return false;
     return slotStatus(t.x,t.y,cargoUnit) === true;
   });
-  reachableTiles = []; attackableTiles = []; rangedTiles = [];
+  reachableTiles = []; attackableTiles = []; rangedTiles = []; rangeRadiusTiles = [];
   updateInfoPanel(`Entladeziel für ${UNIT_STATS[cargoUnit.type].name} wählen (markierte Felder).`);
   render();
 }
@@ -1152,7 +1241,7 @@ let dragStart = {x:0,y:0}, camStart = {x:0,y:0};
 const DRAG_THRESHOLD = 6;
 
 gameCanvas.addEventListener('mousedown', (evt) => {
-  if(evt.button !== 0) return;
+  if(evt.button !== 0 || inputLocked) return;
   isDragging = true;
   dragMoved = false;
   dragStart = {x:evt.clientX, y:evt.clientY};
@@ -1245,6 +1334,7 @@ document.getElementById('home-btn').addEventListener('click', () => {
 
 window.addEventListener('keydown', (evt) => {
   if(document.getElementById('game-screen').classList.contains('hidden')) return;
+  if(inputLocked) return;
   const tag = (document.activeElement && document.activeElement.tagName) || '';
   if(tag==='INPUT' || tag==='TEXTAREA') return;
   const panStep = 60 / camera.zoom;
@@ -1287,7 +1377,7 @@ minimapCanvas.addEventListener('click', (evt) => {
 
 /* ---------- KLICK-LOGIK ---------- */
 function handleGameClick(sx, sy){
-  if(gameOver) return;
+  if(gameOver || inputLocked) return;
   const world = screenToWorld(sx, sy);
   const x = Math.floor(world.x / BASE_TILE);
   const y = Math.floor(world.y / BASE_TILE);
@@ -1305,12 +1395,25 @@ function handleGameClick(sx, sy){
     return;
   }
 
-  // Marschziel-Modus (Taste G oder Aktionsleiste) hat höchste Priorität
+  // Marschziel-Modus (Taste G oder Aktionsleiste) hat höchste Priorität. Die Einheit
+  // marschiert sofort los, genau wie bei einem normalen Klick innerhalb der Reichweite.
   if(awaitingWaypointClick && selectedUnit){
     awaitingWaypointClick = false;
-    setDestination(selectedUnit, x, y);
-    renderUnitActions();
-    render();
+    const unit = selectedUnit;
+    if(setDestination(unit, x, y)){
+      advanceWaypoint(unit);
+      const stillSelectable = units.includes(unit) && !unit.moved;
+      if(stillSelectable){
+        deselect();
+        selectUnit(unit);
+        checkGameOver(); updateHud();
+      } else {
+        finishUnitTurn(unit);
+      }
+    } else {
+      renderUnitActions();
+      render();
+    }
     return;
   }
 
@@ -1329,12 +1432,20 @@ function handleGameClick(sx, sy){
       return;
     }
     awaitingPatrolStep = 0;
-    selectedUnit.patrol = { a: patrolPointA, b: {x,y}, target: 'b' };
-    selectedUnit.destination = null;
+    const unit = selectedUnit;
+    unit.patrol = { a: patrolPointA, b: {x,y}, target: 'b' };
+    unit.destination = null;
     patrolPointA = null;
     updateInfoPanel('Patrouille eingerichtet — Einheit pendelt selbständig zwischen beiden Punkten.');
-    renderUnitActions();
-    render();
+    advancePatrol(unit);
+    const stillSelectable = units.includes(unit) && !unit.moved;
+    if(stillSelectable){
+      deselect();
+      selectUnit(unit);
+      checkGameOver(); updateHud();
+    } else {
+      finishUnitTurn(unit);
+    }
     return;
   }
 
@@ -1344,6 +1455,7 @@ function handleGameClick(sx, sy){
       const { host, cargo } = unloadingCargoUnit;
       cargo.x = x; cargo.y = y;
       cargo.hostId = null;
+      cargo.orderState = null;
       cargo.moved = true; cargo.movesLeft = 0; cargo.actedAtAll = true;
       host.cargo = host.cargo.filter(id=>id!==cargo.id);
       updateInfoPanel(`${UNIT_STATS[cargo.type].name} entladen.`);
@@ -1379,11 +1491,13 @@ function handleGameClick(sx, sy){
     if(rangedTiles.some(t=>t.x===x && t.y===y)){
       const def = pickDefenderAt(x,y,selectedUnit);
       if(def){
+        const attackerSnap = snapshotUnit(selectedUnit);
+        const defenderSnap = snapshotUnit(def.target);
         const res = resolveRangedAttack(selectedUnit, def.target);
-        MusicEngine.start();
         updateInfoPanel(res.destroyed ? 'Ziel durch Fernkampf zerstört!' : (res.hitAny ? 'Treffer, Ziel überlebt.' : 'Fernkampf verfehlt.'));
         if(units.includes(selectedUnit)){ selectedUnit.moved = true; selectedUnit.movesLeft = 0; selectedUnit.actedAtAll = true; }
-        finishUnitTurn(selectedUnit);
+        const finishedUnit = selectedUnit;
+        playCombatSequence(attackerSnap, defenderSnap, () => finishUnitTurn(finishedUnit));
         return;
       }
     }
@@ -1391,8 +1505,9 @@ function handleGameClick(sx, sy){
     if(attackableTiles.some(t=>t.x===x && t.y===y)){
       const def = pickDefenderAt(x,y,selectedUnit);
       if(def){
+        const attackerSnap = snapshotUnit(selectedUnit);
+        const defenderSnap = snapshotUnit(def.target);
         const res = resolveMeleeAttack(selectedUnit, def.target, def.noEntry);
-        MusicEngine.start();
         if(res.winner==='attacker'){
           const destTile = map[y][x];
           // Landeinheiten dürfen Wassereinheiten (und umgekehrt Schiffe Landfelder) nie
@@ -1412,17 +1527,19 @@ function handleGameClick(sx, sy){
         } else {
           updateInfoPanel('Eigene Einheit im Kampf verloren!');
         }
-      } else {
-        const survived = tryCaptureStructure(selectedUnit, x, y);
-        const capturedType = map[y][x].type;
-        if(survived){
-          selectedUnit.x = x; selectedUnit.y = y;
-          updateInfoPanel(capturedType===T_AIRPORT ? 'Flughafen erobert!' : 'Stadt erobert!');
-        } else {
-          updateInfoPanel('Angriff auf die Stadtverteidigung gescheitert — Einheit verloren!');
-        }
-        if(units.includes(selectedUnit)){ selectedUnit.moved = true; selectedUnit.movesLeft = 0; selectedUnit.actedAtAll = true; }
+        const finishedUnit = selectedUnit;
+        playCombatSequence(attackerSnap, defenderSnap, () => finishUnitTurn(finishedUnit));
+        return;
       }
+      const survived = tryCaptureStructure(selectedUnit, x, y);
+      const capturedType = map[y][x].type;
+      if(survived){
+        selectedUnit.x = x; selectedUnit.y = y;
+        updateInfoPanel(capturedType===T_AIRPORT ? 'Flughafen erobert!' : 'Stadt erobert!');
+      } else {
+        updateInfoPanel('Angriff auf die Stadtverteidigung gescheitert — Einheit verloren!');
+      }
+      if(units.includes(selectedUnit)){ selectedUnit.moved = true; selectedUnit.movesLeft = 0; selectedUnit.actedAtAll = true; }
       finishUnitTurn(selectedUnit);
       return;
     }
@@ -1430,6 +1547,7 @@ function handleGameClick(sx, sy){
     // Bewegen (inkl. Laden auf Schiff/Träger) — verbraucht nur die tatsächlichen
     // Bewegungspunkte; bei Restpunkten bleibt die Einheit für weitere Klicks wählbar.
     if(reachableTiles.some(t=>t.x===x && t.y===y)){
+      const animFromX = selectedUnit.x, animFromY = selectedUnit.y;
       const hostAtDest = units.find(o => o.x===x && o.y===y && o.hp>0 && o.owner===selectedUnit.owner &&
         UNIT_STATS[o.type].canCarry && UNIT_STATS[o.type].canCarry.includes(selectedUnit.type));
       const costUsed = reachDist[key(x,y)] || 0;
@@ -1440,6 +1558,7 @@ function handleGameClick(sx, sy){
 
       if(hostAtDest && hostAtDest.cargo.length < UNIT_STATS[hostAtDest.type].portageCapacity){
         selectedUnit.hostId = hostAtDest.id;
+        selectedUnit.orderState = null;
         selectedUnit.x = hostAtDest.x; selectedUnit.y = hostAtDest.y;
         selectedUnit.moved = true; selectedUnit.movesLeft = 0;
         hostAtDest.cargo.push(selectedUnit.id);
@@ -1461,6 +1580,7 @@ function handleGameClick(sx, sy){
           updateInfoPanel(selectedUnit.movesLeft>0 ? `Bewegt — noch ${selectedUnit.movesLeft} Bewegungspunkt(e) übrig.` : 'Einheit bewegt.');
         }
       }
+      if(units.includes(selectedUnit)) queueMoveAnim(selectedUnit, animFromX, animFromY);
       const movedUnit = selectedUnit;
       const stillSelectable = units.includes(movedUnit) && !movedUnit.moved;
       if(stillSelectable){
@@ -1672,6 +1792,7 @@ function autoLoadEligibleUnitsAt(x,y){
       s.cargo.length < UNIT_STATS[s.type].portageCapacity);
     if(host){
       cargo.hostId = host.id;
+      cargo.orderState = null;
       host.cargo.push(cargo.id);
     }
   }
@@ -1837,6 +1958,7 @@ function runAiOwnerTurn(owner){
 
 function aiActUnit(unit){
   const stats = UNIT_STATS[unit.type];
+  const animFromX = unit.x, animFromY = unit.y;
   let targets = hostileTargetsFor(unit.owner);
   if(targets.length===0) return;
 
@@ -1891,13 +2013,14 @@ function aiActUnit(unit){
         }
       }
       unit.moved = true; unit.movesLeft = 0;
+      queueMoveAnim(unit, animFromX, animFromY);
       return;
     }
     const tile = map[a.y][a.x];
     if(unitsAt(a.x,a.y).length===0 && (tile.type===T_CITY || tile.type===T_AIRPORT) && tile.owner!==unit.owner && stats.subclass==='land'){
       const survived = tryCaptureStructure(unit, a.x, a.y);
       if(survived){ unit.x=a.x; unit.y=a.y; }
-      if(units.includes(unit)){ unit.moved = true; unit.movesLeft = 0; }
+      if(units.includes(unit)){ unit.moved = true; unit.movesLeft = 0; queueMoveAnim(unit, animFromX, animFromY); }
       return;
     }
   }
@@ -1922,6 +2045,7 @@ function aiActUnit(unit){
         }
       }
       unit.moved = true; unit.movesLeft = 0;
+      queueMoveAnim(unit, animFromX, animFromY);
       return;
     }
     const cost = terrainCost(map[step.y][step.x], unit);
@@ -1931,12 +2055,13 @@ function aiActUnit(unit){
     refuelIfOnOwnCity(unit);
     const t = map[step.y][step.x];
     if((t.type===T_CITY || t.type===T_AIRPORT) && t.owner!==unit.owner && stats.subclass==='land'){
-      if(!tryCaptureStructure(unit, step.x, step.y)){ return; }
+      if(!tryCaptureStructure(unit, step.x, step.y)){ queueMoveAnim(unit, animFromX, animFromY); return; }
     }
   }
   unit.movesLeft = remaining;
   unit.moved = remaining<=0;
   unit.actedAtAll = true;
+  queueMoveAnim(unit, animFromX, animFromY);
 }
 
 // Landeinheit ohne erreichbares Ziel auf der eigenen Landmasse: zur Küste marschieren
@@ -1948,6 +2073,7 @@ function aiSeekTransport(unit, myLm){
       UNIT_STATS[o.type].canCarry && UNIT_STATS[o.type].canCarry.includes(unit.type));
     if(host && host.cargo.length < UNIT_STATS[host.type].portageCapacity){
       unit.hostId = host.id;
+      unit.orderState = null;
       host.cargo.push(unit.id);
       unit.moved = true; unit.movesLeft = 0; unit.actedAtAll = true;
       return;
@@ -2021,6 +2147,7 @@ function aiActShipWithCargo(ship){
         map[a.y][a.x].type!==T_WATER && terrainAllowed(map[a.y][a.x], cargoUnit) && unitsAt(a.x,a.y).length===0);
       if(landSpot){
         cargoUnit.x=landSpot.x; cargoUnit.y=landSpot.y; cargoUnit.hostId=null;
+        cargoUnit.orderState=null;
         cargoUnit.moved=true; cargoUnit.movesLeft=0; cargoUnit.actedAtAll=true;
         ship.cargo = ship.cargo.filter(id=>id!==cargoUnit.id);
       }
@@ -2047,7 +2174,7 @@ function aiActShipPickup(ship){
     if(d<bestDist){ bestDist=d; best=u; }
   }
   if(Math.max(Math.abs(best.x-ship.x), Math.abs(best.y-ship.y)) <= 1){
-    best.hostId = ship.id; ship.cargo.push(best.id);
+    best.hostId = ship.id; best.orderState = null; ship.cargo.push(best.id);
     best.moved=true; best.movesLeft=0; best.actedAtAll=true;
     ship.moved=true; ship.movesLeft=0; ship.actedAtAll=true;
     return;
@@ -2073,7 +2200,7 @@ function aiActShipPickup(ship){
   ship.actedAtAll = true;
 
   if(Math.max(Math.abs(best.x-ship.x), Math.abs(best.y-ship.y)) <= 1 && !best.hostId){
-    best.hostId = ship.id; ship.cargo.push(best.id);
+    best.hostId = ship.id; best.orderState = null; ship.cargo.push(best.id);
     best.moved=true; best.movesLeft=0; best.actedAtAll=true;
   }
 }
@@ -2250,6 +2377,14 @@ function render(){
     gctx.fillStyle = 'rgba(63,169,245,0.35)';
     gctx.fillRect(scr.x, scr.y, tsz, tsz);
   }
+  // Reichweiten-Umriss: zeigt alle Felder innerhalb der Fernkampf-Reichweite, auch ohne
+  // Ziel dort — damit man intuitiv sieht, wie nah man an ein Ziel heran muss.
+  for(const t of rangeRadiusTiles){
+    const scr = worldToScreen(t.x*BASE_TILE, t.y*BASE_TILE);
+    gctx.strokeStyle = 'rgba(224,150,50,0.55)';
+    gctx.lineWidth = Math.max(1, tsz*0.04);
+    gctx.strokeRect(scr.x+1, scr.y+1, tsz-2, tsz-2);
+  }
   for(const t of rangedTiles){
     const scr = worldToScreen(t.x*BASE_TILE, t.y*BASE_TILE);
     gctx.fillStyle = 'rgba(224,150,50,0.4)';
@@ -2344,6 +2479,22 @@ function render(){
     }
   }
 
+  // Kampf-Blinken: pulsierender Rahmen um beide Kampfteilnehmer (Spieleraktionen, siehe
+  // playCombatSequence) — bewusst als reiner Rahmen statt Geister-Sprite, damit es auch
+  // funktioniert, wenn sich Angreifer/Verteidiger-Position durch den Kampf ändert.
+  if(combatFx && combatFx.blinkOn){
+    for(const snap of [combatFx.a, combatFx.d]){
+      const scr = worldToScreen(snap.x*BASE_TILE, snap.y*BASE_TILE);
+      gctx.save();
+      gctx.strokeStyle = '#ff3b3b';
+      gctx.lineWidth = Math.max(3, tsz*0.12);
+      gctx.shadowColor = '#ff3b3b';
+      gctx.shadowBlur = 14;
+      gctx.strokeRect(scr.x+2, scr.y+2, tsz-4, tsz-4);
+      gctx.restore();
+    }
+  }
+
   renderMinimap();
 }
 
@@ -2398,7 +2549,18 @@ function drawUnitShape(type, isAir){
 }
 
 function drawUnit(u, tsz){
-  const scr = worldToScreen(u.x*BASE_TILE, u.y*BASE_TILE);
+  let wx = u.x*BASE_TILE, wy = u.y*BASE_TILE;
+  if(u._animFrom){
+    const t = (performance.now() - u._animStart) / u._animDuration;
+    if(t < 1){
+      const ease = 1 - Math.pow(1-Math.max(0,t), 2); // ease-out
+      wx = (u._animFrom.x + (u.x-u._animFrom.x)*ease) * BASE_TILE;
+      wy = (u._animFrom.y + (u.y-u._animFrom.y)*ease) * BASE_TILE;
+    } else {
+      u._animFrom = null;
+    }
+  }
+  const scr = worldToScreen(wx, wy);
   const px = scr.x, py = scr.y;
   const s = UNIT_STATS[u.type];
   const color = OWNER_COLORS[u.owner];
@@ -2552,7 +2714,7 @@ function initGame(){
   unitIdCounter = 1;
   turnNumber = 1;
   selectedUnit = null;
-  reachableTiles = []; attackableTiles = []; rangedTiles = []; unloadTiles = [];
+  reachableTiles = []; attackableTiles = []; rangedTiles = []; rangeRadiusTiles = []; unloadTiles = [];
   unloadingCargoUnit = null;
   awaitingWaypointClick = false;
   awaitingPatrolStep = 0;
@@ -2586,6 +2748,178 @@ function initGame(){
   }
   render();
 }
+
+/* ---------- SPEICHERN / LADEN (3 lokale Spielstände via localStorage) ---------- */
+const SAVE_SLOTS = 3;
+function saveKey(slot){ return `empire_save_slot_${slot}`; }
+
+function serializeGame(){
+  return {
+    version: 1,
+    savedAt: Date.now(),
+    mapConfig: JSON.parse(JSON.stringify(mapConfig)),
+    COLS, ROWS,
+    map, units, unitIdCounter,
+    aiOwners, turnOrder, turnIndex, turnNumber, currentTurnOwner,
+    gameOver, fogEnabled,
+    exploredSet: [...exploredSet],
+    camera: { x:camera.x, y:camera.y, zoom:camera.zoom }
+  };
+}
+
+function hasActiveGame(){
+  return !document.getElementById('game-screen').classList.contains('hidden');
+}
+
+function saveGameToSlot(slot){
+  try {
+    localStorage.setItem(saveKey(slot), JSON.stringify(serializeGame()));
+    return true;
+  } catch(e){
+    alert('Speichern fehlgeschlagen: ' + e.message);
+    return false;
+  }
+}
+
+function loadGameFromSlot(slot){
+  const raw = localStorage.getItem(saveKey(slot));
+  if(!raw) return false;
+  let data;
+  try { data = JSON.parse(raw); } catch(e){ return false; }
+
+  mapConfig = data.mapConfig;
+  COLS = data.COLS; ROWS = data.ROWS;
+  map = data.map;
+  units = data.units;
+  unitIdCounter = data.unitIdCounter;
+  aiOwners = data.aiOwners;
+  turnOrder = data.turnOrder;
+  turnIndex = data.turnIndex;
+  turnNumber = data.turnNumber;
+  currentTurnOwner = data.currentTurnOwner;
+  gameOver = data.gameOver;
+  fogEnabled = !!data.fogEnabled;
+  exploredSet = new Set(data.exploredSet || []);
+  visibleSet = new Set();
+
+  selectedUnit = null;
+  reachableTiles = []; attackableTiles = []; rangedTiles = []; rangeRadiusTiles = []; unloadTiles = [];
+  unloadingCargoUnit = null;
+  awaitingWaypointClick = false; awaitingPatrolStep = 0; patrolPointA = null; awaitingRallyClick = null;
+  dragPreviewTarget = null;
+  minimapTerrainCanvas = null;
+  selectedBuildCity = null;
+
+  document.getElementById('title-screen').classList.add('hidden');
+  document.getElementById('setup-screen').classList.add('hidden');
+  document.getElementById('save-load-panel').classList.add('hidden');
+  document.getElementById('game-over').classList.toggle('hidden', !gameOver);
+  document.getElementById('game-screen').classList.remove('hidden');
+  document.getElementById('unit-info-panel').classList.add('hidden');
+  closeBuildPanel();
+
+  resizeCanvas();
+  camera.zoom = (data.camera && data.camera.zoom) || 1;
+  if(data.camera) centerCameraOn(data.camera.x + (gameCanvas.width/camera.zoom)/2, data.camera.y + (gameCanvas.height/camera.zoom)/2);
+  else clampCamera();
+  updateHud();
+  renderUnitActions();
+  updateInfoPanel(`Spielstand geladen — Runde ${turnNumber}.`);
+  render();
+  MusicEngine.start();
+  return true;
+}
+
+function deleteSaveSlot(slot){
+  localStorage.removeItem(saveKey(slot));
+}
+
+function getSlotMeta(slot){
+  const raw = localStorage.getItem(saveKey(slot));
+  if(!raw) return null;
+  try {
+    const data = JSON.parse(raw);
+    return {
+      savedAt: data.savedAt,
+      turnNumber: data.turnNumber,
+      aiCount: data.aiOwners ? data.aiOwners.length : '?'
+    };
+  } catch(e){ return null; }
+}
+
+function formatSlotDate(ts){
+  const d = new Date(ts);
+  const pad = n => String(n).padStart(2,'0');
+  return `${pad(d.getDate())}.${pad(d.getMonth()+1)}.${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function openSaveLoadPanel(){
+  renderSaveSlots();
+  document.getElementById('save-load-panel').classList.remove('hidden');
+}
+function closeSaveLoadPanel(){
+  document.getElementById('save-load-panel').classList.add('hidden');
+}
+
+function renderSaveSlots(){
+  const inGame = hasActiveGame();
+  const container = document.getElementById('save-slots');
+  container.innerHTML = '';
+  for(let slot=1; slot<=SAVE_SLOTS; slot++){
+    const meta = getSlotMeta(slot);
+    const row = document.createElement('div');
+    row.className = 'save-slot';
+
+    const info = document.createElement('div');
+    info.className = 'save-slot-info';
+    const nameEl = document.createElement('span');
+    nameEl.className = 'save-slot-name';
+    nameEl.textContent = `Spielstand ${slot}`;
+    const metaEl = document.createElement('span');
+    metaEl.className = 'save-slot-meta';
+    metaEl.textContent = meta ? `Runde ${meta.turnNumber} · ${meta.aiCount} Gegner · ${formatSlotDate(meta.savedAt)}` : 'Leer';
+    info.appendChild(nameEl); info.appendChild(metaEl);
+
+    const actions = document.createElement('div');
+    actions.className = 'save-slot-actions';
+
+    if(inGame){
+      const saveBtn = document.createElement('button');
+      saveBtn.textContent = '💾 Speichern';
+      saveBtn.addEventListener('click', () => {
+        saveGameToSlot(slot);
+        renderSaveSlots();
+      });
+      actions.appendChild(saveBtn);
+    }
+
+    const loadBtn = document.createElement('button');
+    loadBtn.textContent = '📂 Laden';
+    loadBtn.disabled = !meta;
+    loadBtn.addEventListener('click', () => {
+      if(loadGameFromSlot(slot)) closeSaveLoadPanel();
+    });
+    actions.appendChild(loadBtn);
+
+    const delBtn = document.createElement('button');
+    delBtn.textContent = '×';
+    delBtn.disabled = !meta;
+    delBtn.title = 'Löschen';
+    delBtn.addEventListener('click', () => {
+      deleteSaveSlot(slot);
+      renderSaveSlots();
+    });
+    actions.appendChild(delBtn);
+
+    row.appendChild(info);
+    row.appendChild(actions);
+    container.appendChild(row);
+  }
+}
+
+document.getElementById('save-load-btn').addEventListener('click', openSaveLoadPanel);
+document.getElementById('load-btn-title').addEventListener('click', openSaveLoadPanel);
+document.getElementById('save-load-close-btn').addEventListener('click', closeSaveLoadPanel);
 
 /* ---------- TITELBILDSCHIRM ---------- */
 const titleCanvas = document.getElementById('title-canvas');
@@ -2646,7 +2980,13 @@ document.querySelectorAll('.setup-opt').forEach(btn => {
     document.querySelectorAll(`.setup-options[data-group="${group}"] .setup-opt`).forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     mapConfig[group] = btn.dataset.value;
+    if(group==='animEnabled'){
+      document.getElementById('anim-speed-row').style.display = (btn.dataset.value==='on') ? 'flex' : 'none';
+    }
   });
+});
+document.getElementById('anim-speed-slider').addEventListener('input', (evt) => {
+  animSpeed = parseInt(evt.target.value, 10) || 5;
 });
 
 document.getElementById('restart-btn').addEventListener('click', () => {
