@@ -285,7 +285,7 @@ function playCombatSequence(attackerSnap, defenderSnap, onDone){
 }
 
 function snapshotUnit(u){
-  return { x:u.x, y:u.y, type:u.type, owner:u.owner };
+  return { id:u.id, x:u.x, y:u.y, type:u.type, owner:u.owner };
 }
 
 /* ---------- KARTE GENERIEREN ---------- */
@@ -1014,9 +1014,15 @@ function selectUnit(u){
     u.orderState = null;
     u.destination = null;
     u.patrol = null;
-    u.moved = false;
-    const s = UNIT_STATS[u.type];
-    u.movesLeft = isCrippled(u) ? Math.max(1, Math.floor(s.move/2)) : s.move;
+    // Volle Bewegungspunkte gibt es beim Reaktivieren nur, wenn die Einheit diese Runde
+    // noch gar nichts getan hat (Stand-Befehl kam aus einer Vorrunde). Hat sie diese Runde
+    // schon (teilweise) bewegt und wurde DANACH z.B. auf Warten gesetzt, bleiben die
+    // bereits verbrauchten Bewegungspunkte verbraucht — kein Nachschub durchs Aufwecken.
+    if(!u.actedAtAll){
+      const s = UNIT_STATS[u.type];
+      u.movesLeft = isCrippled(u) ? Math.max(1, Math.floor(s.move/2)) : s.move;
+    }
+    u.moved = u.movesLeft<=0;
   }
   selectedUnit = u;
   closeBuildPanel();
@@ -1054,8 +1060,10 @@ function selectUnit(u){
     }
   }
 
-  // Fernkampf nur, wenn noch KEIN Bewegungspunkt verbraucht wurde (Originalregel).
-  if(stats.range > 0 && u.movesLeft===stats.move && !u.actedAtAll){
+  // Fernkampf ist unabhängig von der Bewegung: die Einheit darf vorher schon (teilweise)
+  // gezogen sein, solange noch mindestens ein Bewegungspunkt übrig ist. Das Ziel muss nur
+  // innerhalb der Feuerreichweite um die aktuelle Position liegen, nicht in Zugreichweite.
+  if(stats.range > 0 && u.movesLeft > 0){
     for(let dy=-stats.range; dy<=stats.range; dy++){
       for(let dx=-stats.range; dx<=stats.range; dx++){
         if(dx===0 && dy===0) continue;
@@ -2552,9 +2560,23 @@ function render(){
     }
   }
 
+  // Kampf-Geister: die eigentliche Kampfauflösung (inkl. Entfernen der verlierenden
+  // Einheit) ist zu diesem Zeitpunkt längst passiert — ohne diesen Zusatz wäre die
+  // unterlegene Einheit schon vor Ende der Blink-Sequenz spurlos verschwunden und der
+  // Ausgang stünde optisch vorzeitig fest. Für jeden Kampfteilnehmer, der nicht mehr
+  // (unverändert) unter den lebenden Einheiten existiert, wird daher anhand des Snapshots
+  // ein Platzhalter an der ursprünglichen Kampfposition gezeichnet, bis die Sequenz endet.
+  if(combatFx){
+    for(const snap of [combatFx.a, combatFx.d]){
+      const stillAlive = units.some(o => o.id===snap.id && o.hp>0);
+      if(!stillAlive) drawGhostUnit(snap, tsz);
+    }
+  }
+
   // Kampf-Blinken: pulsierender Rahmen um beide Kampfteilnehmer (Spieleraktionen, siehe
-  // playCombatSequence) — bewusst als reiner Rahmen statt Geister-Sprite, damit es auch
-  // funktioniert, wenn sich Angreifer/Verteidiger-Position durch den Kampf ändert.
+  // playCombatSequence) — bewusst als reiner Rahmen statt Geister-Sprite für die Position,
+  // damit es auch funktioniert, wenn sich Angreifer/Verteidiger-Position durch den Kampf
+  // ändert (siehe drawGhostUnit oben für die verschwundene Einheit selbst).
   if(combatFx && combatFx.blinkOn){
     for(const snap of [combatFx.a, combatFx.d]){
       const scr = worldToScreen(snap.x*BASE_TILE, snap.y*BASE_TILE);
@@ -2619,6 +2641,34 @@ function drawUnitShape(type, isAir){
     default:
       gctx.arc(0,0,0.34,0,Math.PI*2);
   }
+}
+
+// Zeichnet eine bereits aus dem Spiel entfernte (oder rein virtuelle) Kampfeinheit anhand
+// ihres Snapshots — nur die Silhouette + Label, ohne HP-Balken/Status (die gibt es nicht
+// mehr), damit sie während der Kampf-Sequenz sichtbar bleibt statt vorzeitig zu verschwinden.
+function drawGhostUnit(snap, tsz){
+  const scr = worldToScreen(snap.x*BASE_TILE, snap.y*BASE_TILE);
+  const px = scr.x, py = scr.y;
+  const s = UNIT_STATS[snap.type];
+  const cx = px+tsz/2, cy = py+tsz/2;
+  gctx.save();
+  gctx.globalAlpha = 0.85;
+  gctx.save();
+  gctx.translate(cx, cy);
+  gctx.scale(tsz, tsz);
+  drawUnitShape(snap.type, s.category==='air');
+  gctx.restore();
+  gctx.fillStyle = OWNER_COLORS[snap.owner];
+  gctx.fill();
+  gctx.lineWidth = 1.5;
+  gctx.strokeStyle = '#000';
+  gctx.stroke();
+  gctx.fillStyle = '#0a0e14';
+  gctx.font = `bold ${Math.floor(tsz*0.28)}px monospace`;
+  gctx.textAlign = 'center';
+  gctx.textBaseline = 'middle';
+  gctx.fillText(s.label, cx, cy+1);
+  gctx.restore();
 }
 
 function drawUnit(u, tsz){
