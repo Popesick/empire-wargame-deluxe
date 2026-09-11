@@ -57,7 +57,8 @@ const SIZE_PRESETS = {
   small:  { cols:36, rows:24 },
   medium: { cols:52, rows:34 },
   large:  { cols:68, rows:44 },
-  huge:   { cols:136, rows:88 } // vierfache Fläche von "Groß"
+  huge:   { cols:136, rows:88 }, // vierfache Fläche von "Groß"
+  archipelago: { cols:192, rows:124 } // doppelte Fläche von "Sehr Groß", feste Größe
 };
 const CITY_TILES_PER_CITY = { sparse:70, normal:44, dense:28 };
 
@@ -387,6 +388,61 @@ function carveIslands(totalPlayers){
   return centers;
 }
 
+// Lässt von (cx,cy) aus per Random-Walk eine Landmasse wachsen, begrenzt auf `radius` um
+// ihr Zentrum (wie beim Insel-Wachstum in carveIslands) — gemeinsam genutzt für den
+// Archipel-Zentralkontinent und dessen Ring-Inseln.
+function growBlob(cx, cy, radius, steps){
+  let x=cx, y=cy;
+  for(let s=0; s<steps; s++){
+    const ix=Math.round(x), iy=Math.round(y);
+    if(inBounds(ix,iy)) map[iy][ix].type = rollTerrain();
+    let dir = DIRS8[Math.floor(Math.random()*8)];
+    let nx = x+dir[0], ny = y+dir[1];
+    if(Math.hypot(nx-cx, ny-cy) > radius){
+      dir = [Math.sign(cx-x), Math.sign(cy-y)];
+      if(dir[0]===0 && dir[1]===0) dir = DIRS8[Math.floor(Math.random()*8)];
+      nx = x+dir[0]; ny = y+dir[1];
+    }
+    x = Math.min(COLS-2, Math.max(1, nx));
+    y = Math.min(ROWS-2, Math.max(1, ny));
+  }
+}
+
+// Archipel: ein großer Kontinent in der Mitte (neutrales Kerngebiet), umgeben von 8
+// Inseln im Ring, auf denen Spieler und KI-Gegner starten. Gibt die 8 Insel-Zentren
+// zurück, damit generateMap() die Hauptstädte gezielt nur dorthin setzen kann (nie auf
+// den Zentralkontinent).
+function carveArchipelago(){
+  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++) map[y][x].type = T_WATER;
+  const factor = landAmountFactor();
+  const cx = COLS/2, cy = ROWS/2;
+
+  const baseIslandRadius = Math.max(4, Math.round(Math.min(COLS,ROWS)*0.07));
+  const islandRadius = Math.max(4, Math.round(baseIslandRadius * Math.min(1.3, factor)));
+
+  // Kontinentradius so begrenzen, dass zwischen ihm und dem Kartenrand noch genug Platz
+  // für den Insel-Ring (inkl. Sicherheitsabstand) bleibt — unabhängig von der gewählten
+  // Landmasse-Menge, damit die Inseln nie über den Kartenrand hinausragen.
+  const available = Math.min(COLS,ROWS)/2 - islandRadius - 6;
+  const continentRadius = Math.max(10, Math.round(Math.min(available*0.62, Math.min(COLS,ROWS)*0.30*factor)));
+  const ringRadius = Math.min(continentRadius + islandRadius + 8, Math.min(COLS,ROWS)/2 - islandRadius - 3);
+
+  growBlob(cx, cy, continentRadius, Math.round(continentRadius*continentRadius*3.0));
+
+  const islandSteps = Math.round(islandRadius*islandRadius*2.4);
+  const islandCenters = [];
+  for(let i=0;i<8;i++){
+    const angle = (i/8)*Math.PI*2 + (Math.random()-0.5)*0.25;
+    let icx = cx + Math.cos(angle)*ringRadius;
+    let icy = cy + Math.sin(angle)*ringRadius;
+    icx = Math.min(COLS-islandRadius-2, Math.max(islandRadius+2, icx));
+    icy = Math.min(ROWS-islandRadius-2, Math.max(islandRadius+2, icy));
+    growBlob(icx, icy, islandRadius, islandSteps);
+    islandCenters.push({x:Math.round(icx), y:Math.round(icy)});
+  }
+  return islandCenters;
+}
+
 // Verbundene Landmassen ermitteln (8-Richtungen) — Basis für Insel-Hauptstadtverteilung
 // und die KI-Transportlogik ("gehört Ziel X zur selben Landmasse wie Einheit Y?").
 function computeLandmasses(){
@@ -492,20 +548,35 @@ function generateMap(){
   const totalPlayers = 1 + aiOwners.length;
   map = generateBaseGrid(T_PLAIN);
 
-  if(mapConfig.landform === 'islands'){
+  let archipelagoIslandCenters = null;
+  if(mapConfig.landform === 'archipelago'){
+    archipelagoIslandCenters = carveArchipelago();
+  } else if(mapConfig.landform === 'islands'){
     carveIslands(totalPlayers);
   } else {
     carveContinentCoastline();
   }
 
-  const { components } = computeLandmasses();
+  const { id: landId, components } = computeLandmasses();
   components.sort((a,b) => b.length - a.length);
 
-  // Hauptstadt-Plätze: größte Landmassen zuerst, je Landmasse den Punkt mit größtem
-  // Mindestabstand zu bereits gewählten Hauptstädten (verteilt sie gut).
+  // Beim Archipel dürfen Hauptstädte NUR auf den 8 Ring-Inseln landen, nie auf dem
+  // großen Zentralkontinent (der bleibt neutrales Kerngebiet zum Erobern).
+  let capitalCandidates = components;
+  if(archipelagoIslandCenters){
+    const islandComps = [...new Set(
+      archipelagoIslandCenters
+        .map(c => components[landId[c.y][c.x]])
+        .filter(Boolean)
+    )];
+    if(islandComps.length>0) capitalCandidates = islandComps;
+  }
+
+  // Hauptstadt-Plätze: größte (Kandidaten-)Landmassen zuerst, je Landmasse den Punkt mit
+  // größtem Mindestabstand zu bereits gewählten Hauptstädten (verteilt sie gut).
   const capitalSpots = [];
   for(let i=0; i<totalPlayers; i++){
-    const comp = components.length ? components[i % components.length] : null;
+    const comp = capitalCandidates.length ? capitalCandidates[i % capitalCandidates.length] : null;
     if(!comp || comp.length===0){ capitalSpots.push({x:1,y:1}); continue; }
     let best=null, bestScore=-1;
     for(const t of comp){
@@ -2961,7 +3032,9 @@ function renderMinimap(){
 
 /* ---------- SPIEL INITIALISIEREN ---------- */
 function initGame(){
-  const sizeCfg = SIZE_PRESETS[mapConfig.size] || SIZE_PRESETS.medium;
+  // Archipel hat eine feste Kartengröße (doppelte Fläche von "Sehr Groß"), unabhängig
+  // von der separat wählbaren Kartengröße.
+  const sizeCfg = mapConfig.landform==='archipelago' ? SIZE_PRESETS.archipelago : (SIZE_PRESETS[mapConfig.size] || SIZE_PRESETS.medium);
   COLS = sizeCfg.cols; ROWS = sizeCfg.rows;
 
   const count = Math.max(1, Math.min(4, parseInt(mapConfig.aiCount,10) || 1));
@@ -3245,6 +3318,11 @@ document.querySelectorAll('.setup-opt').forEach(btn => {
     mapConfig[group] = btn.dataset.value;
     if(group==='animEnabled'){
       document.getElementById('anim-speed-row').style.display = (btn.dataset.value==='on') ? 'flex' : 'none';
+    }
+    if(group==='landform'){
+      // Archipel hat eine feste Kartengröße — die Größenauswahl währenddessen sperren.
+      const isArchipelago = btn.dataset.value==='archipelago';
+      document.querySelectorAll('.setup-options[data-group="size"] .setup-opt').forEach(b => b.disabled = isArchipelago);
     }
   });
 });
