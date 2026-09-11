@@ -62,7 +62,12 @@ const SIZE_PRESETS = {
 };
 const CITY_TILES_PER_CITY = { sparse:70, normal:44, dense:28 };
 
-let mapConfig = { size:'medium', landform:'continent', landAmount:'normal', cities:'normal', aiCount:1, fogOfWar:'off', animEnabled:'on' };
+let mapConfig = { mode:'classic', size:'medium', landform:'continent', landAmount:'normal', cities:'normal', aiCount:1, fogOfWar:'off', animEnabled:'on' };
+// Enhanced ist rein additiv: alle Classic-Funktionen bleiben unverändert, Enhanced schaltet
+// per isEnhanced()-Abfrage INNERHALB derselben Funktionen zusätzliches Verhalten frei —
+// niemals über eine separate/kopierte Funktion. Dadurch wirken künftige Classic-Änderungen
+// automatisch auch im Enhanced-Modus.
+function isEnhanced(){ return mapConfig.mode === 'enhanced'; }
 let animSpeed = 5; // 1 (langsam) .. 10 (schnell)
 let fogEnabled = false;
 
@@ -73,9 +78,11 @@ const T_MOUNTAIN = 'mountain';
 const T_WATER = 'water';
 const T_CITY = 'city';
 const T_AIRPORT = 'airport';
+const T_RADAR = 'radar'; // Enhanced: von Ingenieuren gebaute Struktur, siehe tryCaptureStructure
 
-const MOVE_COST = { [T_PLAIN]:1, [T_FOREST]:2, [T_HILLS]:2, [T_MOUNTAIN]:3, [T_WATER]:1, [T_CITY]:1, [T_AIRPORT]:1 };
+const MOVE_COST = { [T_PLAIN]:1, [T_FOREST]:2, [T_HILLS]:2, [T_MOUNTAIN]:3, [T_WATER]:1, [T_CITY]:1, [T_AIRPORT]:1, [T_RADAR]:1 };
 const SIGHT_RANGE = { ground:2, air:4 };
+const RADAR_SIGHT_RANGE = 6; // Enhanced: Radius, den eine Radarstation dauerhaft aufdeckt
 
 /* ---------- KONSTANTEN: SPIELER ---------- */
 const OWNER_PLAYER = 'player';
@@ -115,9 +122,15 @@ const UNIT_STATS = {
   carrier:    { name:'Träger',        label:'C', category:'ground', subclass:'sea',  move:5,  dmg:1, power:35, defense:50, hp:9,  cost:42, range:0, portageCapacity:3, canCarry:['fighter','helicopter'] },
   submarine:  { name:'U-Boot',        label:'U', category:'ground', subclass:'sea',  move:5,  dmg:2, power:70, defense:30, hp:4,  cost:24, range:0, canDive:true },
   helicopter: { name:'Helikopter',    label:'H', category:'air',    subclass:null,   move:6,  dmg:1, power:50, defense:40, hp:3,  cost:18, range:0, noMountain:true },
-  fighter:    { name:'Jäger',         label:'F', category:'air',    subclass:null,   move:10, dmg:1, power:60, defense:30, hp:2,  cost:25, range:0, fuel:8 }
+  fighter:    { name:'Jäger',         label:'F', category:'air',    subclass:null,   move:10, dmg:1, power:60, defense:30, hp:2,  cost:25, range:0, fuel:8 },
+  // Enhanced-exklusiv: kein Angriff (dmg:0 -> gewinnt nie einen Kampf, siehe selectUnit),
+  // baut Straßen/Eisenbahn/Festungen/Radar/Flughäfen, siehe advanceConstruction.
+  engineer:   { name:'Ingenieur',     label:'E', category:'ground', subclass:'land', move:3,  dmg:0, power:10, defense:25, hp:2,  cost:15, range:0, canBuild:true }
 };
 const BUILD_ORDER = ['infantry','tank','artillery','destroyer','transport','battleship','carrier','submarine','helicopter','fighter'];
+// Enhanced hängt den Ingenieur zusätzlich an — überall dort verwenden, wo Baumenü/KI-
+// Gewichtung/Einheiten-Übersicht die buildbaren Typen auflisten, statt BUILD_ORDER direkt.
+function buildOrderFor(){ return isEnhanced() ? [...BUILD_ORDER, 'engineer'] : BUILD_ORDER; }
 
 const CITY_PRODUCTION = 3;
 const CAPITAL_PRODUCTION = 5;
@@ -149,7 +162,9 @@ let awaitingWaypointClick = false;
 let awaitingPatrolStep = 0; // 0=inaktiv, 1=wartet auf Punkt A, 2=wartet auf Punkt B
 let patrolPointA = null;
 let awaitingRallyClick = null; // {x,y} der Stadt, für die gerade ein Sammelpunkt gesetzt wird
+let awaitingEngineerOrder = null; // Enhanced: {kind:'road'|'rail'}, wartet auf Zielklick
 let dragPreviewTarget = null;
+const ENGINEER_BUILD_LABEL = { road:'Straße', rail:'Eisenbahn', fortress:'Festung', radar:'Radar', airport:'Flughafen', rebuild:'Wiederaufbau' };
 
 const camera = { x:0, y:0, zoom:1 };
 
@@ -290,8 +305,12 @@ function snapshotUnit(u){
 }
 
 /* ---------- KARTE GENERIEREN ---------- */
+// rail/fortress/ruined/specialization-Felder sind reine Enhanced-Overlays — in Classic
+// bleiben sie immer auf ihrem Default und werden nirgends gelesen/gesetzt.
 function newTile(type){
-  return { type, owner:null, buildPoints:0, buildType:'infantry', capital:false, road:false };
+  return { type, owner:null, buildPoints:0, buildType:'infantry', capital:false, road:false,
+    rail:false, fortress:false, ruined:false,
+    specialization:null, pendingSpecialization:null, specializationTimer:0 };
 }
 
 function rollTerrain(){
@@ -703,7 +722,10 @@ function spawnUnit(owner, type, x, y){
     experience: 'green',
     xpWins: 0,
     hostId: null,
-    cargo: stats.portageCapacity ? [] : null
+    cargo: stats.portageCapacity ? [] : null,
+    buildOrder: null,          // Enhanced: Ingenieur-Bauauftrag {type, path?, turnsLeft}
+    killXp: 0,                 // Enhanced: Veteranen-System, siehe grantExperience
+    level: 0
   };
   units.push(u);
   return u;
@@ -747,8 +769,98 @@ function terrainAllowed(tile, unit){
 function terrainCost(tile, unit){
   const s = UNIT_STATS[unit.type];
   if(s.category==='air') return 1;
+  if(isEnhanced() && tile.rail && s.subclass==='land') return 0.25;
   if(tile.road) return 1;
   return MOVE_COST[tile.type];
+}
+
+/* ---------- ENHANCED: INGENIEUR-BAUAUFTRÄGE ---------- */
+// Bauzeit (Runden) je Untergrund für Straßen; Eisenbahn kostet bei bereits vorhandener
+// Straße pauschal 2 Runden, sonst den Straßenpreis + 2 (siehe engineerTileCost).
+const ROAD_BUILD_COST = { [T_PLAIN]:2, [T_FOREST]:3, [T_HILLS]:4, [T_MOUNTAIN]:5 };
+function engineerTileCost(kind, tileType, hasRoad){
+  const base = ROAD_BUILD_COST[tileType] !== undefined ? ROAD_BUILD_COST[tileType] : 2;
+  if(kind==='rail') return hasRoad ? 2 : base + 2;
+  return base;
+}
+
+// Startet einen einfachen (pfadlosen) Bauauftrag: Festung, Radar, Flughafen, Wiederaufbau.
+function startEngineerBuild(unit, type, turns){
+  unit.buildOrder = { type, turnsLeft: turns };
+  unit.moved = true;
+  updateInfoPanel(`Bauauftrag gestartet (${turns} Runde${turns===1?'':'n'}).`);
+  finishUnitTurn(unit);
+}
+
+// Bricht einen laufenden Bauauftrag ab und gibt die Einheit an den Spieler zurück (kein
+// Bewegungsverlust, da noch nichts vollendet wurde).
+function cancelEngineerBuild(unit){
+  unit.buildOrder = null;
+  unit.moved = false;
+  renderUnitActions();
+  updateSelectionInfo();
+  render();
+}
+
+// Schließt die aktuelle Baustufe eines Ingenieur-Bauauftrags ab (ein Feld bei Straße/
+// Eisenbahn, oder den gesamten Auftrag bei Festung/Radar/Flughafen/Wiederaufbau).
+function completeConstructionStep(unit){
+  const order = unit.buildOrder;
+  const tile = map[unit.y][unit.x];
+  if(order.type==='road'){
+    tile.road = true;
+  } else if(order.type==='rail'){
+    tile.road = true; tile.rail = true;
+  } else if(order.type==='fortress'){
+    tile.fortress = true;
+    unit.buildOrder = null; unit.moved = false;
+    updateInfoPanel('Festung fertiggestellt.');
+    return;
+  } else if(order.type==='radar'){
+    const owner = unit.owner;
+    const keepRoad = tile.road, keepRail = tile.rail;
+    map[unit.y][unit.x] = Object.assign(newTile(T_RADAR), { owner, road:keepRoad, rail:keepRail });
+    unit.buildOrder = null; unit.moved = false;
+    updateInfoPanel('Radarstation fertiggestellt.');
+    if(fogEnabled) recomputeVisibility();
+    return;
+  } else if(order.type==='airport'){
+    tile.type = T_AIRPORT; tile.owner = unit.owner;
+    unit.buildOrder = null; unit.moved = false;
+    updateInfoPanel('Flughafen fertiggestellt.');
+    return;
+  } else if(order.type==='rebuild'){
+    tile.ruined = false; tile.owner = unit.owner; tile.buildPoints = 0; tile.buildType = 'infantry';
+    unit.buildOrder = null; unit.moved = false;
+    updateInfoPanel('Stadt wiederaufgebaut.');
+    return;
+  }
+  // Straße/Eisenbahn: nächstes Feld im Pfad in Angriff nehmen, sonst fertig.
+  if(order.path && order.path.length>0){
+    const next = order.path.shift();
+    unit.x = next.x; unit.y = next.y;
+    const nextTile = map[unit.y][unit.x];
+    order.turnsLeft = engineerTileCost(order.type, nextTile.type, nextTile.road);
+  } else {
+    unit.buildOrder = null;
+    unit.moved = false;
+    updateInfoPanel(`${order.type==='road' ? 'Straßenbau' : 'Eisenbahnbau'} abgeschlossen.`);
+  }
+}
+
+// Rundenende-Verarbeitung für Ingenieur-Bauaufträge (Aufruf analog zu advanceWaypoint/
+// advancePatrol). Feindkontakt bricht den Bau ab — der Ingenieur kann sich nicht wehren.
+function advanceConstruction(unit){
+  const order = unit.buildOrder;
+  if(!order || unit.hp<=0) return;
+  if(adjacentTiles(unit.x,unit.y).some(t => pickDefenderAt(t.x,t.y,unit))){
+    updateInfoPanel(`${ownerLabel(unit.owner)}: Ingenieur hat Feindkontakt — Bauauftrag unterbrochen.`);
+    unit.buildOrder = null;
+    unit.moved = false;
+    return;
+  }
+  order.turnsLeft--;
+  if(order.turnsLeft <= 0) completeConstructionStep(unit);
 }
 
 // Ausnahme "kann sonst unpassierbares Feld betreten, um an Bord zu gehen":
@@ -976,7 +1088,9 @@ function resolveCityDefenseCombat(attacker){
 // Gibt zurück, ob der Angreifer den Vorgang überlebt hat.
 function tryCaptureStructure(unit, x, y, deferMorph){
   const tile = map[y][x];
-  if(tile.type===T_AIRPORT && tile.owner!==unit.owner){
+  // Radarstationen (Enhanced) verhalten sich wie Flughäfen: keine eigene Verteidigung,
+  // Landeinheiten übernehmen sie kampflos.
+  if((tile.type===T_AIRPORT || tile.type===T_RADAR) && tile.owner!==unit.owner){
     tile.owner = unit.owner;
     return true;
   }
@@ -1095,7 +1209,7 @@ function advanceWaypoint(unit){
     unit.actedAtAll = true;
     refuelIfOnOwnCity(unit);
     const tile = map[step.y][step.x];
-    if((tile.type===T_CITY || tile.type===T_AIRPORT) && tile.owner!==unit.owner && stats.subclass==='land'){
+    if((tile.type===T_CITY || tile.type===T_AIRPORT || tile.type===T_RADAR) && tile.owner!==unit.owner && stats.subclass==='land'){
       if(!tryCaptureStructure(unit, step.x, step.y)){ queueMoveAnim(unit, animFromX, animFromY); return; } // Einheit an Stadtverteidigung gescheitert
     }
     // Adjazenter Feind nach dem Schritt -> ebenfalls abbrechen (Feindkontakt)
@@ -1154,7 +1268,7 @@ function advancePatrol(unit){
     unit.actedAtAll = true;
     refuelIfOnOwnCity(unit);
     const tile = map[step.y][step.x];
-    if((tile.type===T_CITY || tile.type===T_AIRPORT) && tile.owner!==unit.owner && stats.subclass==='land'){
+    if((tile.type===T_CITY || tile.type===T_AIRPORT || tile.type===T_RADAR) && tile.owner!==unit.owner && stats.subclass==='land'){
       if(!tryCaptureStructure(unit, step.x, step.y)){ queueMoveAnim(unit, animFromX, animFromY); return; }
     }
     if(enemyWithinRadius(unit, stats.move)){
@@ -1197,24 +1311,27 @@ function selectUnit(u){
 
   // Angriffsziele: von JEDER innerhalb der Restreichweite erreichbaren Position aus,
   // nicht nur von der Startposition — so kann sich eine Einheit nähern und im selben
-  // Zug noch zuschlagen.
+  // Zug noch zuschlagen. Waffenlose Einheiten (dmg<=0, z.B. der Ingenieur) bekommen
+  // keine Angriffsziele — sie könnten ohnehin nie einen Kampf gewinnen.
   const origins = [{x:u.x,y:u.y,d:0}, ...reachableTiles.map(t=>({x:t.x,y:t.y,d:reachDist[key(t.x,t.y)]}))];
   const seenAttack = new Set();
-  for(const o of origins){
-    for(const t of adjacentTiles(o.x,o.y)){
-      const tk = key(t.x,t.y);
-      if(seenAttack.has(tk)) continue;
-      const def = pickDefenderAt(t.x,t.y,u);
-      if(def){
-        const entryCost = o.d + terrainCost(map[t.y][t.x], u);
-        if(entryCost <= u.movesLeft){ attackableTiles.push(t); seenAttack.add(tk); }
-        continue;
-      }
-      const tile = map[t.y][t.x];
-      const occ = unitsAt(t.x,t.y);
-      if(occ.length===0 && (tile.type===T_CITY || tile.type===T_AIRPORT) && tile.owner!==u.owner && stats.subclass==='land'){
-        attackableTiles.push(t);
-        seenAttack.add(tk);
+  if(stats.dmg > 0){
+    for(const o of origins){
+      for(const t of adjacentTiles(o.x,o.y)){
+        const tk = key(t.x,t.y);
+        if(seenAttack.has(tk)) continue;
+        const def = pickDefenderAt(t.x,t.y,u);
+        if(def){
+          const entryCost = o.d + terrainCost(map[t.y][t.x], u);
+          if(entryCost <= u.movesLeft){ attackableTiles.push(t); seenAttack.add(tk); }
+          continue;
+        }
+        const tile = map[t.y][t.x];
+        const occ = unitsAt(t.x,t.y);
+        if(occ.length===0 && (tile.type===T_CITY || tile.type===T_AIRPORT || tile.type===T_RADAR) && tile.owner!==u.owner && stats.subclass==='land'){
+          attackableTiles.push(t);
+          seenAttack.add(tk);
+        }
       }
     }
   }
@@ -1339,7 +1456,6 @@ function renderUnitActions(){
   bar.innerHTML = '';
   if(!selectedUnit || currentTurnOwner!==OWNER_PLAYER){ return; }
   const u = selectedUnit, s = UNIT_STATS[u.type];
-  if(u.moved) return;
 
   const addBtn = (label, onClick, toggled) => {
     const b = document.createElement('button');
@@ -1348,6 +1464,16 @@ function renderUnitActions(){
     if(onClick) b.addEventListener('click', onClick);
     bar.appendChild(b);
   };
+
+  // Ein laufender Ingenieur-Bauauftrag blockiert wie jeder andere Standbefehl die
+  // restlichen Aktionen, bekommt aber (als einzige Ausnahme zu u.moved) einen
+  // Abbrechen-Button, damit der Auftrag jederzeit aufgehoben werden kann.
+  if(u.buildOrder){
+    addBtn(`🚧 Baut ${ENGINEER_BUILD_LABEL[u.buildOrder.type]||''}... (${Math.ceil(u.buildOrder.turnsLeft)} Runde${Math.ceil(u.buildOrder.turnsLeft)===1?'':'n'}) — Abbrechen`,
+      () => cancelEngineerBuild(u));
+    return;
+  }
+  if(u.moved) return;
 
   addBtn('🎯 Marschziel [G]', () => {
     awaitingWaypointClick = true;
@@ -1410,6 +1536,31 @@ function renderUnitActions(){
       const cu = units.find(x=>x.id===cid);
       if(!cu) continue;
       addBtn(`📦 Entladen: ${UNIT_STATS[cu.type].name}`, () => startUnload(u, cu));
+    }
+  }
+
+  if(isEnhanced() && u.type==='engineer'){
+    const eTile = map[u.y][u.x];
+    const buildableGround = [T_PLAIN,T_FOREST,T_HILLS,T_MOUNTAIN].includes(eTile.type);
+    addBtn('🛣️ Straße bauen', () => {
+      awaitingEngineerOrder = { kind:'road' };
+      updateInfoPanel('Zielpunkt für die Straße anklicken...');
+    }, awaitingEngineerOrder && awaitingEngineerOrder.kind==='road');
+    addBtn('🚆 Eisenbahn bauen', () => {
+      awaitingEngineerOrder = { kind:'rail' };
+      updateInfoPanel('Zielpunkt für die Eisenbahn anklicken...');
+    }, awaitingEngineerOrder && awaitingEngineerOrder.kind==='rail');
+    if(buildableGround && !eTile.fortress){
+      addBtn('🏰 Festung bauen (5 Runden)', () => startEngineerBuild(u, 'fortress', 5));
+    }
+    if(fogEnabled && buildableGround && eTile.type!==T_RADAR){
+      addBtn('📡 Radar bauen (5 Runden)', () => startEngineerBuild(u, 'radar', 5));
+    }
+    if([T_PLAIN,T_FOREST,T_HILLS].includes(eTile.type)){
+      addBtn('🛬 Flughafen bauen (2 Runden)', () => startEngineerBuild(u, 'airport', 2));
+    }
+    if(eTile.type===T_CITY && eTile.ruined){
+      addBtn('🏗️ Stadt wiederaufbauen (15 Runden)', () => startEngineerBuild(u, 'rebuild', 15));
     }
   }
 }
@@ -1608,6 +1759,29 @@ function handleGameClick(sx, sy){
     return;
   }
 
+  // Ingenieur-Straßen-/Eisenbahnbau (Enhanced): Zielpunkt anklicken, der Ingenieur wählt
+  // den Weg selbst (wie beim Marschziel) und bebaut jedes Feld auf dem Weg der Reihe nach.
+  if(awaitingEngineerOrder && selectedUnit){
+    const kind = awaitingEngineerOrder.kind;
+    awaitingEngineerOrder = null;
+    const unit = selectedUnit;
+    const path = computePathTowards(unit, {x,y});
+    if(!path || path.length===0){
+      updateInfoPanel('Zielpunkt für den Bauauftrag ist nicht erreichbar.');
+    } else {
+      const fullPath = [{x:unit.x,y:unit.y}, ...path];
+      const firstTile = map[fullPath[0].y][fullPath[0].x];
+      unit.buildOrder = { type:kind, path: fullPath.slice(1), turnsLeft: engineerTileCost(kind, firstTile.type, firstTile.road) };
+      unit.moved = true;
+      updateInfoPanel(`${kind==='road'?'Straßenbau':'Eisenbahnbau'} gestartet (${fullPath.length} Feld(er)).`);
+      finishUnitTurn(unit);
+      return;
+    }
+    renderUnitActions();
+    render();
+    return;
+  }
+
   // Marschziel-Modus (Taste G oder Aktionsleiste) hat höchste Priorität. Die Einheit
   // marschiert sofort los, genau wie bei einem normalen Klick innerhalb der Reichweite.
   if(awaitingWaypointClick && selectedUnit){
@@ -1729,9 +1903,9 @@ function handleGameClick(sx, sy){
           // tatsächlich betreten, auch wenn sie den Kampf gewinnen — Angriff ja, Einzug nein.
           canEnter = res.entered && terrainAllowed(destTile, selectedUnit);
           if(canEnter){
-            if((destTile.type===T_CITY || destTile.type===T_AIRPORT) && destTile.owner!==selectedUnit.owner && stats.subclass==='land'){
-              if(destTile.type===T_AIRPORT) destTile.owner = selectedUnit.owner;
-              else captureCity(x,y, selectedUnit.owner, selectedUnit, true);
+            if((destTile.type===T_CITY || destTile.type===T_AIRPORT || destTile.type===T_RADAR) && destTile.owner!==selectedUnit.owner && stats.subclass==='land'){
+              if(destTile.type===T_CITY) captureCity(x,y, selectedUnit.owner, selectedUnit, true);
+              else destTile.owner = selectedUnit.owner;
             }
             updateInfoPanel('Gegner besiegt, Feld eingenommen!');
           } else {
@@ -1763,12 +1937,12 @@ function handleGameClick(sx, sy){
       // bekommt daher dieselbe Blink+Sound-Sequenz wie ein Kampf gegen eine Einheit.
       const attackerSnap = snapshotUnit(selectedUnit);
       const cityOwnerBefore = map[y][x].owner;
-      const wasAirport = map[y][x].type===T_AIRPORT;
+      const wasAirport = map[y][x].type===T_AIRPORT || map[y][x].type===T_RADAR;
       const defenderSnap = { x, y, type:'infantry', owner: cityOwnerBefore };
       const survived = tryCaptureStructure(selectedUnit, x, y, true);
       const capturedType = map[y][x].type;
       if(survived){
-        updateInfoPanel(capturedType===T_AIRPORT ? 'Flughafen erobert!' : 'Stadt erobert!');
+        updateInfoPanel(capturedType===T_AIRPORT ? 'Flughafen erobert!' : (capturedType===T_RADAR ? 'Radarstation erobert!' : 'Stadt erobert!'));
       } else {
         updateInfoPanel('Angriff auf die Stadtverteidigung gescheitert — Einheit verloren!');
       }
@@ -1836,10 +2010,10 @@ function handleGameClick(sx, sy){
           deferMoveAnim = true;
         } else {
           selectedUnit.x = x; selectedUnit.y = y;
-          if((destTile.type===T_CITY || destTile.type===T_AIRPORT) && destTile.owner!==selectedUnit.owner){
+          if((destTile.type===T_CITY || destTile.type===T_AIRPORT || destTile.type===T_RADAR) && destTile.owner!==selectedUnit.owner){
             if(stats.subclass==='land'){
               tryCaptureStructure(selectedUnit, x, y);
-              updateInfoPanel('Flughafen erobert!');
+              updateInfoPanel(destTile.type===T_RADAR ? 'Radarstation erobert!' : 'Flughafen erobert!');
             } else {
               updateInfoPanel('Angelegt – nur Landeinheiten erobern Städte.');
             }
@@ -1891,7 +2065,7 @@ function handleGameClick(sx, sy){
 // weiter, statt immer dieselbe (erste) auszuwählen. Gibt zurück, ob eine Einheit gewählt wurde.
 function selectOrCycleStackAt(x,y){
   const stack = unitsAt(x,y)
-    .filter(u=>u.owner===OWNER_PLAYER && (!u.moved || u.orderState || u.destination || u.patrol || u.dugIn))
+    .filter(u=>u.owner===OWNER_PLAYER && (!u.moved || u.orderState || u.destination || u.patrol || u.dugIn || u.buildOrder))
     .sort((a,b)=>a.id-b.id);
   if(stack.length===0) return false;
   if(selectedUnit && stack.includes(selectedUnit) && stack.length>1){
@@ -1950,7 +2124,7 @@ function renderBuildPanel(){
 
   const optionsDiv = document.getElementById('build-options');
   optionsDiv.innerHTML = '';
-  for(const type of BUILD_ORDER){
+  for(const type of buildOrderFor()){
     const stats = UNIT_STATS[type];
     const disabled = stats.subclass==='sea' && !coastal;
     const btn = document.createElement('button');
@@ -1987,7 +2161,7 @@ document.getElementById('info-close-btn').addEventListener('click', () => unitIn
 function buildUnitInfoTable(){
   const table = document.getElementById('unit-info-table');
   let html = '<tr><th>Einheit</th><th>Klasse</th><th>Bew.</th><th>Dmg</th><th>Ang%</th><th>Vert%</th><th>HP</th><th>Kosten</th><th>Reich.</th><th>Fracht</th><th>Sprit</th></tr>';
-  for(const type of BUILD_ORDER){
+  for(const type of buildOrderFor()){
     const s = UNIT_STATS[type];
     const cls = s.category==='air' ? 'Luft' : (s.subclass==='sea' ? 'See' : 'Boden');
     html += `<tr><td>${s.label} ${s.name}</td><td>${cls}</td>` +
@@ -2005,10 +2179,14 @@ function pickAiBuildType(coastal){
   else if(t < 14) weights = { infantry:0.28, tank:0.24, artillery:0.14, destroyer:0.08, transport:0.08, battleship:0.04, carrier:0.02, submarine:0.04, helicopter:0.06, fighter:0.02 };
   else weights = { infantry:0.16, tank:0.2, artillery:0.1, destroyer:0.08, transport:0.08, battleship:0.1, carrier:0.06, submarine:0.08, helicopter:0.08, fighter:0.06 };
   if(!coastal) weights = Object.assign({}, weights, { destroyer:0, transport:0, battleship:0, carrier:0, submarine:0 });
-  const total = BUILD_ORDER.reduce((a,type)=>a+(weights[type]||0), 0);
+  // Enhanced: KI baut auch Ingenieure, damit sie Straßen/Eisenbahn/Festungen/Radar
+  // tatsächlich einsetzt — moderates Gewicht, kein Kampfwert also nicht zu viele davon.
+  if(isEnhanced()) weights = Object.assign({}, weights, { engineer: t < 6 ? 0.1 : 0.12 });
+  const order = buildOrderFor();
+  const total = order.reduce((a,type)=>a+(weights[type]||0), 0);
   const r = Math.random() * total;
   let acc = 0;
-  for(const type of BUILD_ORDER){
+  for(const type of order){
     acc += weights[type] || 0;
     if(r <= acc) return type;
   }
@@ -2117,8 +2295,11 @@ function processEndOfTurnUnitState(owner){
 
 // Rasten/Warten-Stationsbefehle bei Rundenbeginn auswerten: bei Feindkontakt (oder für
 // Rasten zusätzlich bei voller HP) wird die Einheit reaktiviert und dem Spieler zurückgegeben.
+// Läuft noch ein Ingenieur-Bauauftrag (Enhanced), wird die Einheit ebenso wieder als
+// "erledigt" markiert — processEndOfTurnUnitState hat moved zuvor pauschal zurückgesetzt.
 function processOrderStates(owner){
   for(const u of unitsOf(owner)){
+    if(u.buildOrder){ u.moved = true; u.movesLeft = 0; continue; }
     if(!u.orderState) continue;
     const enemyAdjacent = adjacentTiles(u.x,u.y).some(t => pickDefenderAt(t.x,t.y,u));
     const fullyHealed = u.orderState==='resting' && u.hp >= UNIT_STATS[u.type].hp;
@@ -2167,6 +2348,7 @@ function endPlayerTurn(){
   // bis zuletzt durch erneutes Anklicken der Einheit noch geändert/abgebrochen werden.
   for(const u of unitsOf(OWNER_PLAYER)) advanceWaypoint(u);
   for(const u of unitsOf(OWNER_PLAYER)) advancePatrol(u);
+  if(isEnhanced()) for(const u of unitsOf(OWNER_PLAYER)) advanceConstruction(u);
   processCityProduction(OWNER_PLAYER);
   processFuel(OWNER_PLAYER);
   processDefensiveFire(OWNER_PLAYER);
@@ -2224,7 +2406,8 @@ function runAiOwnerTurn(owner){
     if(UNIT_STATS[u.type].subclass==='sea' && u.cargo && u.cargo.length>0) aiActShipWithCargo(u);
   }
   for(const u of myUnits()){
-    if(UNIT_STATS[u.type].subclass!=='sea') aiActUnit(u);
+    if(u.type==='engineer') aiActEngineer(u);
+    else if(UNIT_STATS[u.type].subclass!=='sea') aiActUnit(u);
   }
   for(const u of myUnits()){
     if(UNIT_STATS[u.type].subclass==='sea') aiActShipPickup(u);
@@ -2232,6 +2415,7 @@ function runAiOwnerTurn(owner){
 
   for(const u of unitsOf(owner)) advanceWaypoint(u);
   for(const u of unitsOf(owner)) advancePatrol(u);
+  if(isEnhanced()) for(const u of unitsOf(owner)) advanceConstruction(u);
   processCityProduction(owner);
   processFuel(owner);
   processDefensiveFire(owner);
@@ -2294,8 +2478,8 @@ function aiActUnit(unit){
       if(res.winner==='attacker' && res.entered && terrainAllowed(map[a.y][a.x], unit)){
         unit.x=a.x; unit.y=a.y;
         const t=map[a.y][a.x];
-        if((t.type===T_CITY || t.type===T_AIRPORT) && t.owner!==unit.owner && stats.subclass==='land'){
-          if(t.type===T_AIRPORT) t.owner = unit.owner; else captureCity(a.x,a.y,unit.owner,unit);
+        if((t.type===T_CITY || t.type===T_AIRPORT || t.type===T_RADAR) && t.owner!==unit.owner && stats.subclass==='land'){
+          if(t.type===T_CITY) captureCity(a.x,a.y,unit.owner,unit); else t.owner = unit.owner;
         }
       }
       unit.moved = true; unit.movesLeft = 0;
@@ -2303,7 +2487,7 @@ function aiActUnit(unit){
       return;
     }
     const tile = map[a.y][a.x];
-    if(unitsAt(a.x,a.y).length===0 && (tile.type===T_CITY || tile.type===T_AIRPORT) && tile.owner!==unit.owner && stats.subclass==='land'){
+    if(unitsAt(a.x,a.y).length===0 && (tile.type===T_CITY || tile.type===T_AIRPORT || tile.type===T_RADAR) && tile.owner!==unit.owner && stats.subclass==='land'){
       const survived = tryCaptureStructure(unit, a.x, a.y);
       if(survived){ unit.x=a.x; unit.y=a.y; }
       if(units.includes(unit)){ unit.moved = true; unit.movesLeft = 0; queueMoveAnim(unit, animFromX, animFromY); }
@@ -2325,8 +2509,8 @@ function aiActUnit(unit){
         if(res.winner==='attacker' && res.entered && terrainAllowed(map[step.y][step.x], unit)){
           unit.x=step.x; unit.y=step.y;
           const t=map[step.y][step.x];
-          if((t.type===T_CITY || t.type===T_AIRPORT) && t.owner!==unit.owner && stats.subclass==='land'){
-            if(t.type===T_AIRPORT) t.owner = unit.owner; else captureCity(step.x, step.y, unit.owner, unit);
+          if((t.type===T_CITY || t.type===T_AIRPORT || t.type===T_RADAR) && t.owner!==unit.owner && stats.subclass==='land'){
+            if(t.type===T_CITY) captureCity(step.x, step.y, unit.owner, unit); else t.owner = unit.owner;
           }
         }
       }
@@ -2340,7 +2524,7 @@ function aiActUnit(unit){
     unit.x = step.x; unit.y = step.y;
     refuelIfOnOwnCity(unit);
     const t = map[step.y][step.x];
-    if((t.type===T_CITY || t.type===T_AIRPORT) && t.owner!==unit.owner && stats.subclass==='land'){
+    if((t.type===T_CITY || t.type===T_AIRPORT || t.type===T_RADAR) && t.owner!==unit.owner && stats.subclass==='land'){
       if(!tryCaptureStructure(unit, step.x, step.y)){ queueMoveAnim(unit, animFromX, animFromY); return; }
     }
   }
@@ -2348,6 +2532,87 @@ function aiActUnit(unit){
   unit.moved = remaining<=0;
   unit.actedAtAll = true;
   queueMoveAnim(unit, animFromX, animFromY);
+}
+
+/* ---------- ENHANCED: KI-INGENIEUR ---------- */
+function ownerHasRadar(owner){
+  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++) if(map[y][x].type===T_RADAR && map[y][x].owner===owner) return true;
+  return false;
+}
+
+// Bewegt den Ingenieur (ohne Kampf) so weit wie möglich in Richtung target und beendet
+// damit seine Runde — Ingenieure handeln wie andere KI-Einheiten nur einmal pro Zug.
+function aiEngineerMoveTowards(unit, target){
+  const animFromX = unit.x, animFromY = unit.y;
+  const path = computePathTowards(unit, target);
+  if(path && path.length>0){
+    let remaining = unit.movesLeft;
+    for(const step of path){
+      if(pickDefenderAt(step.x, step.y, unit)) break;
+      const cost = terrainCost(map[step.y][step.x], unit);
+      if(cost > remaining) break;
+      remaining -= cost;
+      unit.x = step.x; unit.y = step.y;
+    }
+    unit.movesLeft = remaining;
+    queueMoveAnim(unit, animFromX, animFromY);
+  }
+  unit.moved = true;
+}
+
+// Einfache, aber echte Nutzung aller Enhanced-Baumöglichkeiten: Ruinen zuerst
+// wiederaufbauen, dann bei Nebel des Krieges für ein Radar bei der Hauptstadt sorgen,
+// gelegentlich Festungen auf brauchbarem Gelände errichten und ansonsten das eigene
+// Städtenetz per Straße (oder testweise Eisenbahn) verbinden.
+function aiActEngineer(unit){
+  const owner = unit.owner;
+  const tile = map[unit.y][unit.x];
+
+  if(tile.type===T_CITY && tile.ruined){
+    startEngineerBuild(unit, 'rebuild', 15);
+    return;
+  }
+
+  if(fogEnabled && !ownerHasRadar(owner)){
+    const capital = citiesOf(owner).find(c=>map[c.y][c.x].capital) || citiesOf(owner)[0];
+    if(capital){
+      if(Math.abs(unit.x-capital.x)+Math.abs(unit.y-capital.y)<=2 && [T_PLAIN,T_FOREST,T_HILLS,T_MOUNTAIN].includes(tile.type)){
+        startEngineerBuild(unit, 'radar', 5);
+        return;
+      }
+      aiEngineerMoveTowards(unit, capital);
+      return;
+    }
+  }
+
+  if([T_PLAIN,T_FOREST,T_HILLS,T_MOUNTAIN].includes(tile.type) && !tile.fortress && Math.random()<0.35){
+    startEngineerBuild(unit, 'fortress', 5);
+    return;
+  }
+
+  const myCities = citiesOf(owner);
+  let nearest=null, bestD=Infinity;
+  for(const c of myCities){
+    if(c.x===unit.x && c.y===unit.y) continue;
+    const d = Math.abs(c.x-unit.x)+Math.abs(c.y-unit.y);
+    if(d<bestD){ bestD=d; nearest=c; }
+  }
+  if(nearest){
+    const path = computePathTowards(unit, nearest);
+    if(path && path.length>0 && path.length<40){
+      const needsWork = path.some(p => !map[p.y][p.x].road && ![T_CITY,T_AIRPORT,T_RADAR].includes(map[p.y][p.x].type));
+      const kind = needsWork ? 'road' : (Math.random()<0.2 ? 'rail' : null);
+      if(kind){
+        const fullPath = [{x:unit.x,y:unit.y}, ...path];
+        const firstTile = map[fullPath[0].y][fullPath[0].x];
+        unit.buildOrder = { type:kind, path: fullPath.slice(1), turnsLeft: engineerTileCost(kind, firstTile.type, firstTile.road) };
+        unit.moved = true;
+        return;
+      }
+    }
+  }
+
+  unit.moved = true;
 }
 
 // Landeinheit ohne erreichbares Ziel auf der eigenen Landmasse: zur Küste marschieren
@@ -2596,18 +2861,40 @@ function render(){
       gctx.save();
       if(fogEnabled && !visibleSet.has(key(x,y))) gctx.globalAlpha = 0.45;
 
-      gctx.fillStyle = (tile.type===T_CITY || tile.type===T_AIRPORT) ? '#1b2436' : TILE_COLORS[tile.type];
+      gctx.fillStyle = (tile.type===T_CITY || tile.type===T_AIRPORT || tile.type===T_RADAR) ? '#1b2436' : TILE_COLORS[tile.type];
       gctx.fillRect(px,py,tsz,tsz);
       gctx.strokeStyle = 'rgba(0,0,0,0.25)';
       gctx.strokeRect(px,py,tsz,tsz);
 
-      if(tile.road && tile.type!==T_CITY && tile.type!==T_AIRPORT){
+      if(tile.road && tile.type!==T_CITY && tile.type!==T_AIRPORT && tile.type!==T_RADAR){
         gctx.strokeStyle = 'rgba(224,184,74,0.55)';
         gctx.lineWidth = Math.max(1, tsz*0.08);
         gctx.beginPath();
         gctx.moveTo(px+tsz*0.1, py+tsz*0.5);
         gctx.lineTo(px+tsz*0.9, py+tsz*0.5);
         gctx.stroke();
+      }
+      // Enhanced: Eisenbahn — zwei parallele Linien mit Schwellen statt der einfachen
+      // Straßenlinie, damit sie sich klar vom Straßenbau unterscheidet.
+      if(tile.rail && tile.type!==T_CITY && tile.type!==T_AIRPORT && tile.type!==T_RADAR){
+        gctx.strokeStyle = 'rgba(200,200,210,0.8)';
+        gctx.lineWidth = Math.max(1, tsz*0.035);
+        gctx.beginPath();
+        gctx.moveTo(px+tsz*0.08, py+tsz*0.42); gctx.lineTo(px+tsz*0.92, py+tsz*0.42);
+        gctx.moveTo(px+tsz*0.08, py+tsz*0.58); gctx.lineTo(px+tsz*0.92, py+tsz*0.58);
+        gctx.stroke();
+        for(let tck=0.15; tck<1; tck+=0.18){
+          gctx.beginPath();
+          gctx.moveTo(px+tsz*tck, py+tsz*0.38); gctx.lineTo(px+tsz*tck, py+tsz*0.62);
+          gctx.stroke();
+        }
+      }
+      // Enhanced: Festung — Zinnenrahmen an den Ecken, egal welches Terrain darunter liegt.
+      if(tile.fortress){
+        gctx.strokeStyle = '#e0b84a';
+        gctx.lineWidth = Math.max(1.5, tsz*0.05);
+        const fp = tsz*0.12;
+        gctx.strokeRect(px+fp, py+fp, tsz-2*fp, tsz-2*fp);
       }
 
       if(tile.type===T_MOUNTAIN){
@@ -2659,6 +2946,16 @@ function render(){
         gctx.textAlign = 'center';
         gctx.textBaseline = 'middle';
         gctx.fillText('✈', px+tsz/2, py+tsz/2+1);
+      } else if(tile.type===T_RADAR){
+        const color = tile.owner ? (OWNER_COLORS[tile.owner] || OWNER_COLORS[OWNER_NEUTRAL]) : '#5a6478';
+        gctx.strokeStyle = color;
+        gctx.lineWidth = Math.max(2, tsz*0.06);
+        gctx.beginPath();
+        gctx.arc(px+tsz*0.5, py+tsz*0.62, tsz*0.28, Math.PI, 0);
+        gctx.stroke();
+        gctx.beginPath();
+        gctx.moveTo(px+tsz*0.5, py+tsz*0.62); gctx.lineTo(px+tsz*0.72, py+tsz*0.22);
+        gctx.stroke();
       }
       gctx.restore();
     }
@@ -3142,6 +3439,7 @@ function loadGameFromSlot(slot){
   reachableTiles = []; attackableTiles = []; rangedTiles = []; rangeRadiusTiles = []; unloadTiles = [];
   unloadingCargoUnit = null;
   awaitingWaypointClick = false; awaitingPatrolStep = 0; patrolPointA = null; awaitingRallyClick = null;
+  awaitingEngineerOrder = null;
   dragPreviewTarget = null;
   minimapTerrainCanvas = null;
   selectedBuildCity = null;

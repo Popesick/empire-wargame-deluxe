@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>EMPIRE: Wargame Deluxe</title>
+<title>New Empire</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
@@ -15,7 +15,7 @@
 <div id="title-screen">
   <canvas id="title-canvas" width="900" height="360"></canvas>
   <div class="title-text">
-    <h1>EMPIRE</h1>
+    <h1>NEW EMPIRE</h1>
     <h2>WARGAME DELUXE</h2>
   </div>
   <div class="menu">
@@ -32,6 +32,14 @@
   <h2 class="setup-title">KARTENOPTIONEN</h2>
 
   <div class="setup-grid">
+  <div class="setup-group">
+    <span class="setup-label">Regelwerk</span>
+    <div class="setup-options" data-group="mode">
+      <button class="setup-opt active" data-value="classic">Classic</button>
+      <button class="setup-opt" data-value="enhanced">Enhanced</button>
+    </div>
+  </div>
+
   <div class="setup-group">
     <span class="setup-label">Kartengröße</span>
     <div class="setup-options" data-group="size">
@@ -101,7 +109,7 @@
   </div>
   </div>
 
-  <p class="setup-hint">Inseln: Landmassen sind getrennt, Landeinheiten brauchen Schiffe zum Übersetzen (auch die KI). Archipel: doppelt so groß wie Sehr Groß (Kartengröße fest), großer Kontinent in der Mitte umgeben von 8 Inseln, auf denen Spieler und KI-Gegner starten. Keine Diplomatie — alle gegen alle.</p>
+  <p class="setup-hint">Enhanced: Ingenieure (Straßen/Eisenbahn/Festungen/Radar), Einheiten-Erfahrung mit Levelaufstieg, Stadt-Spezialisierung, Verbrannte Erde und ein Bündnis der Schwachen gegen einen übermächtigen Gegner. Inseln: Landmassen sind getrennt, Landeinheiten brauchen Schiffe zum Übersetzen (auch die KI). Archipel: doppelt so groß wie Sehr Groß (Kartengröße fest), großer Kontinent in der Mitte umgeben von 8 Inseln, auf denen Spieler und KI-Gegner starten. Keine Diplomatie in Classic — alle gegen alle.</p>
 
   <div class="menu">
     <button id="setup-start-btn">▶ Spiel starten</button>
