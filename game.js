@@ -857,7 +857,11 @@ function resolveRangedAttack(attacker, defender){
   return { destroyed:false, hitAny };
 }
 
-function captureCity(x,y, owner, capturingUnit){
+// deferMorph: bei Spieler-Angriffen (mit Kampf-Blink-Sequenz) soll der sichtbare
+// Panzer→Infanterie-Tausch (captureMorph) erst NACH der Sequenz passieren, sonst stünde
+// die neue Garnisonseinheit schon während des Blinkens sichtbar in der Stadt. In dem Fall
+// wird der Tausch nur vorgemerkt (unit.pendingCaptureMorph) statt sofort ausgeführt.
+function captureCity(x,y, owner, capturingUnit, deferMorph){
   const tile = map[y][x];
   if(tile.type !== T_CITY) return;
   tile.owner = owner;
@@ -866,9 +870,16 @@ function captureCity(x,y, owner, capturingUnit){
   tile.rallyPoint = null;
   const stats = UNIT_STATS[capturingUnit.type];
   if(stats.captureMorph && capturingUnit.hp >= stats.hp){
-    destroyUnit(capturingUnit);
-    spawnUnit(owner, stats.captureMorph, x, y);
+    if(deferMorph) capturingUnit.pendingCaptureMorph = { owner, x, y, type: stats.captureMorph };
+    else { destroyUnit(capturingUnit); spawnUnit(owner, stats.captureMorph, x, y); }
   }
+}
+
+function applyPendingCaptureMorph(unit){
+  if(!unit || !unit.pendingCaptureMorph) return;
+  const { owner, x, y, type } = unit.pendingCaptureMorph;
+  destroyUnit(unit);
+  spawnUnit(owner, type, x, y);
 }
 
 // Unbesetzte Städte verteidigen sich wie eine Infanterie-Einheit ("natürliche Verteidigung").
@@ -892,7 +903,7 @@ function resolveCityDefenseCombat(attacker){
 // Versucht, eine unbesetzte gegnerische/neutrale Stadt oder einen Flughafen zu übernehmen
 // (Flughäfen ohne eigene Verteidigung, Städte mit virtuellem Infanterie-Kampf).
 // Gibt zurück, ob der Angreifer den Vorgang überlebt hat.
-function tryCaptureStructure(unit, x, y){
+function tryCaptureStructure(unit, x, y, deferMorph){
   const tile = map[y][x];
   if(tile.type===T_AIRPORT && tile.owner!==unit.owner){
     tile.owner = unit.owner;
@@ -901,7 +912,7 @@ function tryCaptureStructure(unit, x, y){
   if(tile.type===T_CITY && tile.owner!==unit.owner){
     const survived = resolveCityDefenseCombat(unit);
     MusicEngine.start();
-    if(survived) captureCity(x, y, unit.owner, unit);
+    if(survived) captureCity(x, y, unit.owner, unit, deferMorph);
     return survived;
   }
   return true;
@@ -1640,30 +1651,40 @@ function handleGameClick(sx, sy){
         const attackerSnap = snapshotUnit(selectedUnit);
         const defenderSnap = snapshotUnit(def.target);
         const res = resolveMeleeAttack(selectedUnit, def.target, def.noEntry);
+        let canEnter = false;
         if(res.winner==='attacker'){
           const destTile = map[y][x];
           // Landeinheiten dürfen Wassereinheiten (und umgekehrt Schiffe Landfelder) nie
           // tatsächlich betreten, auch wenn sie den Kampf gewinnen — Angriff ja, Einzug nein.
-          const canEnter = res.entered && terrainAllowed(destTile, selectedUnit);
+          canEnter = res.entered && terrainAllowed(destTile, selectedUnit);
           if(canEnter){
-            selectedUnit.x = x; selectedUnit.y = y;
             if((destTile.type===T_CITY || destTile.type===T_AIRPORT) && destTile.owner!==selectedUnit.owner && stats.subclass==='land'){
               if(destTile.type===T_AIRPORT) destTile.owner = selectedUnit.owner;
-              else captureCity(x,y, selectedUnit.owner, selectedUnit);
+              else captureCity(x,y, selectedUnit.owner, selectedUnit, true);
             }
             updateInfoPanel('Gegner besiegt, Feld eingenommen!');
           } else {
             updateInfoPanel('Gegner besiegt — Einheit bleibt auf ihrem Feld.');
           }
-          if(units.includes(selectedUnit)){
-            selectedUnit.moved = true; selectedUnit.movesLeft = 0; selectedUnit.actedAtAll = true;
-            queueMoveAnim(selectedUnit, animFromX, animFromY);
-          }
+          if(units.includes(selectedUnit)){ selectedUnit.moved = true; selectedUnit.movesLeft = 0; selectedUnit.actedAtAll = true; }
         } else {
           updateInfoPanel('Eigene Einheit im Kampf verloren!');
         }
         const finishedUnit = selectedUnit;
-        playCombatSequence(attackerSnap, defenderSnap, () => finishUnitTurnAfterAnim(finishedUnit));
+        // Sowohl die Positionsänderung als auch die Bewegungsanimation erfolgen erst NACH
+        // der Kampfsequenz — sonst stünde die Einheit optisch schon im eroberten Feld,
+        // während der Ausgang (Blinken) noch offen ist.
+        playCombatSequence(attackerSnap, defenderSnap, () => {
+          if(canEnter && units.includes(finishedUnit)){
+            if(finishedUnit.pendingCaptureMorph){
+              applyPendingCaptureMorph(finishedUnit);
+            } else {
+              finishedUnit.x = x; finishedUnit.y = y;
+              queueMoveAnim(finishedUnit, animFromX, animFromY);
+            }
+          }
+          finishUnitTurnAfterAnim(finishedUnit);
+        });
         return;
       }
       // Unbesetzte gegnerische/neutrale Stadt oder Flughafen: Städte verteidigen sich wie
@@ -1673,24 +1694,35 @@ function handleGameClick(sx, sy){
       const cityOwnerBefore = map[y][x].owner;
       const wasAirport = map[y][x].type===T_AIRPORT;
       const defenderSnap = { x, y, type:'infantry', owner: cityOwnerBefore };
-      const survived = tryCaptureStructure(selectedUnit, x, y);
+      const survived = tryCaptureStructure(selectedUnit, x, y, true);
       const capturedType = map[y][x].type;
       if(survived){
-        selectedUnit.x = x; selectedUnit.y = y;
         updateInfoPanel(capturedType===T_AIRPORT ? 'Flughafen erobert!' : 'Stadt erobert!');
       } else {
         updateInfoPanel('Angriff auf die Stadtverteidigung gescheitert — Einheit verloren!');
       }
-      if(units.includes(selectedUnit)){
-        selectedUnit.moved = true; selectedUnit.movesLeft = 0; selectedUnit.actedAtAll = true;
-        queueMoveAnim(selectedUnit, animFromX, animFromY);
-      }
+      if(units.includes(selectedUnit)){ selectedUnit.moved = true; selectedUnit.movesLeft = 0; selectedUnit.actedAtAll = true; }
       const finishedUnit = selectedUnit;
+      const enterField = () => {
+        if(!survived || !units.includes(finishedUnit)) return;
+        if(finishedUnit.pendingCaptureMorph){
+          applyPendingCaptureMorph(finishedUnit);
+        } else {
+          finishedUnit.x = x; finishedUnit.y = y;
+          queueMoveAnim(finishedUnit, animFromX, animFromY);
+        }
+      };
       if(wasAirport){
-        // Flughäfen haben keine eigene Verteidigung — kein Kampf, nur die Bewegung zeigen.
+        // Flughäfen haben keine eigene Verteidigung — kein Kampf, die Bewegung darf sofort
+        // gezeigt werden.
+        enterField();
         finishUnitTurnAfterAnim(finishedUnit);
       } else {
-        playCombatSequence(attackerSnap, defenderSnap, () => finishUnitTurnAfterAnim(finishedUnit));
+        // Auch hier: erst blinken/kämpfen lassen, danach erst der sichtbare Einzug.
+        playCombatSequence(attackerSnap, defenderSnap, () => {
+          enterField();
+          finishUnitTurnAfterAnim(finishedUnit);
+        });
       }
       return;
     }
@@ -1708,6 +1740,7 @@ function handleGameClick(sx, sy){
       if(selectedUnit.destination) selectedUnit.destination = null;
 
       let cityCombat = null; // {attackerSnap, defenderSnap} falls eine Stadtverteidigung bekämpft wurde
+      let deferMoveAnim = false; // true, solange der sichtbare Einzug erst nach dem Kampf gezeigt werden soll
       if(hostAtDest && hostAtDest.cargo.length < UNIT_STATS[hostAtDest.type].portageCapacity){
         selectedUnit.hostId = hostAtDest.id;
         selectedUnit.orderState = null;
@@ -1716,31 +1749,36 @@ function handleGameClick(sx, sy){
         hostAtDest.cargo.push(selectedUnit.id);
         updateInfoPanel(`${stats.name} an Bord von ${UNIT_STATS[hostAtDest.type].name} geladen.`);
       } else {
-        selectedUnit.x = x; selectedUnit.y = y;
         const destTile = map[y][x];
-        if((destTile.type===T_CITY || destTile.type===T_AIRPORT) && destTile.owner!==selectedUnit.owner){
-          if(stats.subclass==='land'){
-            if(destTile.type===T_CITY){
-              // Auch beim Reinlaufen in eine unbesetzte Stadt kämpft die Einheit gegen
-              // deren Grundverteidigung — das soll genauso wie ein echter Kampf sichtbar sein.
-              const attackerSnap = snapshotUnit(selectedUnit);
-              const defenderSnap = { x, y, type:'infantry', owner: destTile.owner };
-              const survived = tryCaptureStructure(selectedUnit, x, y);
-              updateInfoPanel(survived ? 'Stadt erobert!' : 'Angriff auf die Stadtverteidigung gescheitert — Einheit verloren!');
-              cityCombat = { attackerSnap, defenderSnap };
-            } else {
+        if((destTile.type===T_CITY || destTile.type===T_AIRPORT) && destTile.owner!==selectedUnit.owner && stats.subclass==='land' && destTile.type===T_CITY){
+          // Auch beim Reinlaufen in eine unbesetzte Stadt kämpft die Einheit gegen deren
+          // Grundverteidigung — das soll genauso wie ein echter Kampf sichtbar sein. Die
+          // Einheit betritt die Stadt daher (wie bei echtem Kampf) erst NACH dem Ausgang,
+          // damit sie nicht schon während der Blink-Sequenz dort steht.
+          const attackerSnap = snapshotUnit(selectedUnit); // noch an der alten Position
+          const defenderSnap = { x, y, type:'infantry', owner: destTile.owner };
+          const survived = tryCaptureStructure(selectedUnit, x, y, true);
+          // Positionswechsel bewusst NICHT hier, sondern erst im finish()-Callback nach der
+          // Kampfsequenz (siehe unten) — sonst stünde die Einheit optisch schon in der Stadt.
+          updateInfoPanel(survived ? 'Stadt erobert!' : 'Angriff auf die Stadtverteidigung gescheitert — Einheit verloren!');
+          cityCombat = { attackerSnap, defenderSnap, survived };
+          deferMoveAnim = true;
+        } else {
+          selectedUnit.x = x; selectedUnit.y = y;
+          if((destTile.type===T_CITY || destTile.type===T_AIRPORT) && destTile.owner!==selectedUnit.owner){
+            if(stats.subclass==='land'){
               tryCaptureStructure(selectedUnit, x, y);
               updateInfoPanel('Flughafen erobert!');
+            } else {
+              updateInfoPanel('Angelegt – nur Landeinheiten erobern Städte.');
             }
           } else {
-            updateInfoPanel('Angelegt – nur Landeinheiten erobern Städte.');
+            refuelIfOnOwnCity(selectedUnit);
+            updateInfoPanel(selectedUnit.movesLeft>0 ? `Bewegt — noch ${selectedUnit.movesLeft} Bewegungspunkt(e) übrig.` : 'Einheit bewegt.');
           }
-        } else {
-          refuelIfOnOwnCity(selectedUnit);
-          updateInfoPanel(selectedUnit.movesLeft>0 ? `Bewegt — noch ${selectedUnit.movesLeft} Bewegungspunkt(e) übrig.` : 'Einheit bewegt.');
         }
       }
-      if(units.includes(selectedUnit)) queueMoveAnim(selectedUnit, animFromX, animFromY);
+      if(!deferMoveAnim && units.includes(selectedUnit)) queueMoveAnim(selectedUnit, animFromX, animFromY);
       const movedUnit = selectedUnit;
       const finish = () => {
         const stillSelectable = units.includes(movedUnit) && !movedUnit.moved;
@@ -1752,8 +1790,21 @@ function handleGameClick(sx, sy){
           finishUnitTurnAfterAnim(movedUnit);
         }
       };
-      if(cityCombat) playCombatSequence(cityCombat.attackerSnap, cityCombat.defenderSnap, finish);
-      else finish();
+      if(cityCombat){
+        playCombatSequence(cityCombat.attackerSnap, cityCombat.defenderSnap, () => {
+          if(cityCombat.survived && units.includes(movedUnit)){
+            if(movedUnit.pendingCaptureMorph){
+              applyPendingCaptureMorph(movedUnit);
+            } else {
+              movedUnit.x = x; movedUnit.y = y;
+              queueMoveAnim(movedUnit, animFromX, animFromY);
+            }
+          }
+          finish();
+        });
+      } else {
+        finish();
+      }
       return;
     }
 
