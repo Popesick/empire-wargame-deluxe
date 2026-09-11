@@ -246,12 +246,12 @@ const COMBAT_SOUND = {
   helicopter: 'audio/combat-helicopter.mp3',
   artillery: 'audio/combat-artillery.mp3',
   infantry: 'audio/combat-infantry.mp3',
-  tank: 'audio/combat-infantry.mp3',
+  tank: 'audio/combat-tank.mp3',
   destroyer: 'audio/combat-naval.mp3',
   transport: 'audio/combat-naval.mp3',
   battleship: 'audio/combat-naval.mp3',
   carrier: 'audio/combat-naval.mp3',
-  submarine: 'audio/combat-naval.mp3'
+  submarine: 'audio/combat-submarine.mp3'
 };
 
 function playCombatSound(attackerType){
