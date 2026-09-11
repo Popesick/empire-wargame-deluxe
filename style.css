@@ -258,6 +258,13 @@ html,body{
   white-space:nowrap;
 }
 
+#units-to-move-counter{
+  font-family:'VT323', monospace;
+  font-size:20px;
+  color:#e0b84a;
+  white-space:nowrap;
+}
+
 #end-turn-btn, #mute-btn-2, #zoom-in-btn, #zoom-out-btn, #home-btn, #info-btn{
   font-family:'VT323', monospace;
   font-size:20px;

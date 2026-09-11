@@ -432,6 +432,54 @@ function clearMountainsAround(cx, cy){
   }
 }
 
+// Vergrößert die Landmasse um `spot` (Hauptstadt), falls sie zu klein ist, um überhaupt
+// Platz für weitere Städte zu bieten (z.B. ein durch Bay-/Insel-Carving abgeschnittenes
+// 1-3-Feld-Fragment). Wandelt schrittweise das der Hauptstadt nächstgelegene angrenzende
+// Wasserfeld in Land um, bis die Landmasse groß genug ist.
+function growLandmassAroundSpot(spot, minSize){
+  let { id, components } = computeLandmasses();
+  let comp = components[id[spot.y][spot.x]] || [spot];
+  let guard = 0;
+  while(comp.length < minSize && guard < 400){
+    guard++;
+    let bestWater = null, bestDist = Infinity;
+    for(const t of comp){
+      for(const [dx,dy] of DIRS8){
+        const nx=t.x+dx, ny=t.y+dy;
+        if(!inBounds(nx,ny) || map[ny][nx].type!==T_WATER) continue;
+        const d = Math.abs(nx-spot.x)+Math.abs(ny-spot.y);
+        if(d < bestDist){ bestDist = d; bestWater = {x:nx,y:ny}; }
+      }
+    }
+    if(!bestWater) break; // keine angrenzende Wasserkante mehr erreichbar
+    map[bestWater.y][bestWater.x].type = T_PLAIN;
+    comp.push(bestWater);
+  }
+}
+
+// Platziert bis zu `count` zusätzliche neutrale Städte auf einer bestimmten Landmasse
+// (Land-Zugang-Garantie). Wählt je Stadt das freie Landfeld mit dem größten
+// Mindestabstand zu allen bereits vorhandenen Städten (global + bereits hier platzierte),
+// damit sie sich auch auf kleinen Inseln so gut wie möglich verteilen statt zu klumpen.
+function placeAdditionalCitiesOnComponent(comp, existingCities, count){
+  const added = [];
+  for(let n=0; n<count; n++){
+    let best=null, bestScore=-1;
+    const allExisting = existingCities.concat(added);
+    for(const t of comp){
+      if(map[t.y][t.x].type===T_CITY) continue;
+      let minDist = Infinity;
+      for(const c of allExisting) minDist = Math.min(minDist, Math.abs(c.x-t.x)+Math.abs(c.y-t.y));
+      if(minDist > bestScore){ bestScore = minDist; best = t; }
+    }
+    if(!best) break; // Landmasse hat keinen Platz mehr
+    clearMountainsAround(best.x, best.y);
+    map[best.y][best.x] = Object.assign(newTile(T_CITY), { owner: OWNER_NEUTRAL });
+    added.push({x:best.x, y:best.y});
+  }
+  return added;
+}
+
 function buildRoadPath(a, b){
   let x = a.x, y = a.y;
   const markRoad = (px,py) => { if(inBounds(px,py) && map[py][px].type!==T_WATER) map[py][px].road = true; };
@@ -478,6 +526,14 @@ function generateMap(){
     cityList.push({x:spot.x, y:spot.y});
   }
 
+  // Zu kleine Hauptstadt-Landmassen (z.B. durch Bay-/Insel-Carving abgeschnittene
+  // 1-3-Feld-Fragmente wie im gemeldeten Fall) vergrößern, BEVOR Städte verteilt werden —
+  // sonst gibt es später schlicht keinen Platz für weitere Städte auf dieser Landmasse.
+  const MIN_CAPITAL_LANDMASS = 16; // grob genug Raum für Hauptstadt + 3 weitere Städte
+  for(let i=0;i<totalPlayers;i++){
+    growLandmassAroundSpot(capitalSpots[i], MIN_CAPITAL_LANDMASS);
+  }
+
   const tilesPerCity = CITY_TILES_PER_CITY[mapConfig.cities] !== undefined ? CITY_TILES_PER_CITY[mapConfig.cities] : 44;
   const neutralCount = Math.max(4, Math.min(60, Math.round((COLS*ROWS) / tilesPerCity)));
   let placed = 0, attempts = 0;
@@ -515,6 +571,25 @@ function generateMap(){
       clearMountainsAround(bestSpot.x, bestSpot.y);
       map[bestSpot.y][bestSpot.x] = Object.assign(newTile(T_CITY), { owner: OWNER_NEUTRAL });
       cityList.push(bestSpot);
+    }
+  }
+
+  // Zugangs-Garantie: jede Hauptstadt braucht auf ihrer eigenen Landmasse (zu Fuß/über
+  // Land erreichbar, unabhängig von zufälliger Nachbarstadt-Platzierung) mindestens drei
+  // weitere Städte — sonst kann eine kleine/abgeschnittene Landmasse eine isolierte
+  // Hauptstadt ohne jede Ausbaumöglichkeit ergeben. Landmassen frisch neu berechnen, da
+  // sich das Terrain seit dem Sortieren oben (Wachstum kleiner Fragmente) verändert hat.
+  const { id: freshLandId, components: freshComponents } = computeLandmasses();
+  for(let i=0; i<totalPlayers; i++){
+    const spot = capitalSpots[i];
+    const comp = freshComponents[freshLandId[spot.y][spot.x]];
+    if(!comp || comp.length===0) continue;
+    const compKeys = new Set(comp.map(t=>key(t.x,t.y)));
+    const onComponent = cityList.filter(c => compKeys.has(key(c.x,c.y)));
+    const needed = 4 - onComponent.length; // die Hauptstadt selbst zählt schon mit
+    if(needed > 0){
+      const added = placeAdditionalCitiesOnComponent(comp, cityList, needed);
+      cityList.push(...added);
     }
   }
 
@@ -881,14 +956,14 @@ function pickDefenderAt(x,y, attacker){
 
 /* ---------- WEGPUNKT-MARSCHBEFEHLE ---------- */
 // Setzt/validiert ein mehrrundiges Marschziel. Gibt true zurück, wenn angenommen.
-function setDestination(unit, x, y, silent){
+function setDestination(unit, x, y, silent, fromRally){
   if(x===unit.x && y===unit.y){ unit.destination = null; return true; }
   const path = computePathTowards(unit, {x,y});
   if(!path){
     if(!silent) updateInfoPanel('Zielpunkt ist auf diesem Weg nicht erreichbar.');
     return false;
   }
-  unit.destination = {x,y};
+  unit.destination = {x,y, fromRally: !!fromRally};
   unit.orderState = null;
   if(!silent) updateInfoPanel(`Marschziel gesetzt (${path.length} Feld(er) Weg) — Einheit bewegt sich über mehrere Runden selbständig dorthin.`);
   return true;
@@ -905,11 +980,13 @@ function advanceWaypoint(unit){
   while(unit.destination && unit.movesLeft>0 && guard<50){
     guard++;
     if(unit.x===unit.destination.x && unit.y===unit.destination.y){
+      const arrivedFromRally = !!unit.destination.fromRally;
       unit.destination=null;
       const arrTile = map[unit.y][unit.x];
-      // Infanterie/Panzer, die per Marschziel (u.a. Sammelpunkt) in einer eigenen Stadt
-      // ankommen, gehen dort automatisch in Warten, statt weiter wählbar zu bleiben.
-      if((arrTile.type===T_CITY || arrTile.type===T_AIRPORT) && arrTile.owner===unit.owner &&
+      // Nur per SAMMELPUNKT in eine eigene Stadt geschickte Infanterie/Panzer gehen dort
+      // automatisch in Warten. Ein manuell gesetztes Marschziel [G] lässt die Einheit nach
+      // Ankunft weiter frei wählbar, genau wie eine normale Bewegung per Klick.
+      if(arrivedFromRally && (arrTile.type===T_CITY || arrTile.type===T_AIRPORT) && arrTile.owner===unit.owner &&
          (unit.type==='infantry' || unit.type==='tank')){
         unit.orderState = 'waiting';
         unit.moved = true; unit.movesLeft = 0;
@@ -1091,34 +1168,42 @@ function isUnitPending(u){
   return !u.moved && !u.orderState && !u.destination && !u.patrol && !u.dugIn;
 }
 
-// Nächste eigene Einheit, die noch keinen Befehl für diese Runde hat. Zyklisch nach ID
-// sortiert, damit übersprungene Einheiten (der Spieler wählte manuell eine andere)
-// später wieder drankommen.
-function findNextIdleUnit(afterId){
+// Nächste eigene Einheit, die noch keinen Befehl für diese Runde hat. Ist eine
+// Referenzposition (die zuletzt bewegte Einheit) angegeben, gewinnt die räumlich nächste
+// Einheit — bei mehreren gleich weit entfernten entscheidet wie zuvor die zyklische
+// ID-Reihenfolge. Ohne Referenzposition (z.B. Rundenbeginn) gilt nur die ID-Zyklik.
+function findNextIdleUnit(afterId, fromPos){
   const list = unitsOf(OWNER_PLAYER).filter(isUnitPending).sort((a,b)=>a.id-b.id);
   if(list.length===0) return null;
-  if(afterId==null) return list[0];
-  const idx = list.findIndex(u=>u.id>afterId);
-  return idx>=0 ? list[idx] : list[0];
+  const cyclic = (candidates) => {
+    if(afterId==null) return candidates[0];
+    const idx = candidates.findIndex(u=>u.id>afterId);
+    return idx>=0 ? candidates[idx] : candidates[0];
+  };
+  if(!fromPos) return cyclic(list);
+  const distSq = (u) => (u.x-fromPos.x)**2 + (u.y-fromPos.y)**2;
+  const minDist = Math.min(...list.map(distSq));
+  return cyclic(list.filter(u => distSq(u)===minDist));
 }
 
 // TAB: zyklisch durch wirklich unerledigte Einheiten wechseln — identisch zur
 // Auto-Auswahl-Warteschlange. Rasten/Warten/Befestigt UND Einheiten mit laufendem
 // Marschziel/Patrouille sind ausgeschlossen: die sind bereits unterwegs bzw. geparkt,
 // TAB soll nicht damit nerven.
-function findNextInactiveUnit(afterId){
-  return findNextIdleUnit(afterId);
+function findNextInactiveUnit(afterId, fromPos){
+  return findNextIdleUnit(afterId, fromPos);
 }
 
-// Schließt die Aktion einer Einheit ab und wählt automatisch die nächste unerledigte
-// Einheit des Spielers aus (falls noch eine übrig ist).
+// Schließt die Aktion einer Einheit ab und wählt automatisch die dieser Einheit räumlich
+// nächste unerledigte Einheit des Spielers aus (falls noch eine übrig ist).
 function finishUnitTurn(unit){
   const finishedId = unit ? unit.id : null;
+  const fromPos = unit ? {x:unit.x, y:unit.y} : null;
   deselect();
   checkGameOver();
   updateHud();
   if(!gameOver && currentTurnOwner===OWNER_PLAYER){
-    const next = findNextIdleUnit(finishedId);
+    const next = findNextIdleUnit(finishedId, fromPos);
     if(next) selectUnit(next);
   }
 }
@@ -1827,7 +1912,7 @@ function processCityProduction(owner){
           tile.buildPoints -= cost;
           if(owner!==OWNER_PLAYER) tile.buildType = pickAiBuildType(isCoastal(x,y));
           if(tile.rallyPoint && !(tile.rallyPoint.x===x && tile.rallyPoint.y===y)){
-            setDestination(spawned, tile.rallyPoint.x, tile.rallyPoint.y, true);
+            setDestination(spawned, tile.rallyPoint.x, tile.rallyPoint.y, true, true);
           }
         }
       }
@@ -2316,8 +2401,12 @@ function updateHud(){
     chip.innerHTML = `<span class="hud-dot" style="background:${OWNER_COLORS[o]}"></span>${ownerLabel(o)}: <b>${citiesOf(o).length}</b> Städte / <b>${allUnitsOf(o).length}</b> Einh.${dead}`;
     center.appendChild(chip);
   }
+  const pendingCount = unitsOf(OWNER_PLAYER).filter(isUnitPending).length;
+  const counterEl = document.getElementById('units-to-move-counter');
+  counterEl.textContent = `🎯 ${pendingCount}`;
+  counterEl.classList.toggle('hidden', pendingCount===0);
   const allMovedEl = document.getElementById('all-moved-indicator');
-  allMovedEl.classList.toggle('hidden', findNextIdleUnit(null) !== null);
+  allMovedEl.classList.toggle('hidden', pendingCount!==0);
 }
 function updateInfoPanel(text){
   document.getElementById('info-panel').textContent = text;
