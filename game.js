@@ -971,12 +971,47 @@ function effDiff(defender, attacker){
   return defender.effectiveness - attacker.effectiveness;
 }
 
+// Enhanced: Waffengattungs-Duelle mit Vor-/Nachteil (Prozentpunkte Trefferchance),
+// zusätzlich zur normalen Angriff/Verteidigung-Rechnung unten.
+const ENHANCED_MATCHUPS = {
+  submarine:  { battleship:15, transport:15, carrier:15 },
+  destroyer:  { submarine:15 },
+  helicopter: { submarine:15 },
+  fighter:    { helicopter:15, battleship:-15, destroyer:-15 }
+};
+
+// Enhanced: gibt es eine eigene Radarstation der Einheit im Umkreis RADAR_SIGHT_RANGE?
+function isNearOwnRadar(unit){
+  for(let y=0;y<ROWS;y++){
+    for(let x=0;x<COLS;x++){
+      if(map[y][x].type===T_RADAR && map[y][x].owner===unit.owner &&
+         Math.max(Math.abs(x-unit.x), Math.abs(y-unit.y)) <= RADAR_SIGHT_RANGE) return true;
+    }
+  }
+  return false;
+}
+
 function hitChance(attacker, defender, attackerCrippled){
   const a = UNIT_STATS[attacker.type], d = UNIT_STATS[defender.type];
   let chance = 50 + (a.power - d.defense) * 0.6;
   chance += effDiff(defender, attacker) * 5;
   if(defender.dugIn) chance -= 15;
   if(attackerCrippled) chance -= 15;
+  if(isEnhanced()){
+    const matchup = ENHANCED_MATCHUPS[attacker.type] && ENHANCED_MATCHUPS[attacker.type][defender.type];
+    if(matchup) chance += matchup;
+    // Festung: erhöht die Verteidigung des dort stehenden Verteidigers (+5, eingegrabene
+    // Infanterie +10) — die virtuelle Stadtverteidigung hat keine Koordinaten und wird
+    // dadurch automatisch ausgeschlossen.
+    if(defender.x !== undefined && defender.y !== undefined && map[defender.y] && map[defender.y][defender.x] && map[defender.y][defender.x].fortress){
+      chance -= (defender.dugIn && defender.type==='infantry') ? 10 : 5;
+    }
+    // Radar: eigene Flugzeuge im Umkreis haben einen Vorteil gegen feindliche Flugzeuge.
+    if(fogEnabled && a.category==='air' && d.category==='air'){
+      if(attacker.x !== undefined && isNearOwnRadar(attacker)) chance += 10;
+      if(defender.x !== undefined && isNearOwnRadar(defender)) chance -= 10;
+    }
+  }
   return Math.min(99, Math.max(1, Math.round(chance)));
 }
 
@@ -1120,7 +1155,13 @@ function canAttackTargetType(attackerType, defender){
   const d = UNIT_STATS[defender.type];
   if(NO_LAND_ATTACK.includes(attackerType) && d.subclass==='land') return false;
   if(attackerType==='infantry' && d.subclass==='sea') return false;
-  if(defender.subLevel==='deep' && attackerType!=='destroyer') return false;
+  if(defender.subLevel==='deep'){
+    // Enhanced: Hubschrauber orten getauchte U-Boote in ihrem Bewegungsradius (die
+    // eigentliche Radius-Prüfung übernimmt bereits die normale Reichweiten-/Adjazenz-Logik
+    // beim Angriff selbst) und dürfen sie deshalb zusätzlich zum Zerstörer angreifen.
+    const allowed = isEnhanced() ? (attackerType==='destroyer' || attackerType==='helicopter') : attackerType==='destroyer';
+    if(!allowed) return false;
+  }
   return true;
 }
 
