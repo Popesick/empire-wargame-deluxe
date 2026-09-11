@@ -251,6 +251,13 @@ html,body{
   align-items:center;
 }
 
+#all-moved-indicator{
+  font-family:'VT323', monospace;
+  font-size:20px;
+  color:#5ad65a;
+  white-space:nowrap;
+}
+
 #end-turn-btn, #mute-btn-2, #zoom-in-btn, #zoom-out-btn, #home-btn, #info-btn{
   font-family:'VT323', monospace;
   font-size:20px;

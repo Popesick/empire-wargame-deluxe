@@ -843,10 +843,13 @@ function refuelIfOnOwnCity(u){
 // Schlachtschiff kann Küsten-/Landziele bekämpfen). Infanterie kann keine Seeeinheiten
 // angreifen (dafür braucht es Panzer/Artillerie oder eigene Schiffe).
 const NO_LAND_ATTACK = ['submarine','destroyer','carrier','transport'];
-function canAttackTargetType(attackerType, defenderType){
-  const d = UNIT_STATS[defenderType];
+// `defender` ist die volle Einheit (nicht nur der Typ), damit getauchte U-Boote anhand
+// von subLevel erkannt werden können: die sind nur für Zerstörer ortbar/angreifbar.
+function canAttackTargetType(attackerType, defender){
+  const d = UNIT_STATS[defender.type];
   if(NO_LAND_ATTACK.includes(attackerType) && d.subclass==='land') return false;
   if(attackerType==='infantry' && d.subclass==='sea') return false;
+  if(defender.subLevel==='deep' && attackerType!=='destroyer') return false;
   return true;
 }
 
@@ -858,7 +861,7 @@ function pickDefenderAt(x,y, attacker){
     if(u.x===x && u.y===y && u.hp>0 && !u.hostId) occupantsByLevel[getLevel(u)].push(u);
   }
   const eligible = (list) => list
-    .filter(o => o.owner!==attacker.owner && canAttackTargetType(attacker.type, o.type))
+    .filter(o => o.owner!==attacker.owner && canAttackTargetType(attacker.type, o))
     .sort((a,b) => a.id-b.id); // Stapel (z.B. in Städten) wird stabil von der ältesten Einheit an abgearbeitet
 
   if(allowedLevels.includes('air')){
@@ -901,7 +904,18 @@ function advanceWaypoint(unit){
   let guard = 0;
   while(unit.destination && unit.movesLeft>0 && guard<50){
     guard++;
-    if(unit.x===unit.destination.x && unit.y===unit.destination.y){ unit.destination=null; break; }
+    if(unit.x===unit.destination.x && unit.y===unit.destination.y){
+      unit.destination=null;
+      const arrTile = map[unit.y][unit.x];
+      // Infanterie/Panzer, die per Marschziel (u.a. Sammelpunkt) in einer eigenen Stadt
+      // ankommen, gehen dort automatisch in Warten, statt weiter wählbar zu bleiben.
+      if((arrTile.type===T_CITY || arrTile.type===T_AIRPORT) && arrTile.owner===unit.owner &&
+         (unit.type==='infantry' || unit.type==='tank')){
+        unit.orderState = 'waiting';
+        unit.moved = true; unit.movesLeft = 0;
+      }
+      break;
+    }
     const path = computePathTowards(unit, unit.destination);
     if(!path || path.length===0){
       updateInfoPanel(`${ownerLabel(unit.owner)}: Marschbefehl abgebrochen — kein Weg zum Ziel.`);
@@ -935,11 +949,23 @@ function advanceWaypoint(unit){
   queueMoveAnim(unit, animFromX, animFromY);
 }
 
-// Patrouille: pendelt selbständig zwischen zwei Wegpunkten (A/B), bricht wie ein
-// Marschbefehl bei Feindkontakt ab.
+// Gibt es eine feindliche Einheit innerhalb des vollen Bewegungsradius (Chebyshev-Distanz)?
+function enemyWithinRadius(unit, radius){
+  return units.some(o => o.owner!==unit.owner && o.hp>0 && !o.hostId &&
+    Math.max(Math.abs(o.x-unit.x), Math.abs(o.y-unit.y)) <= radius);
+}
+
+// Patrouille: pendelt selbständig zwischen zwei Wegpunkten (A/B), bricht ab, sobald eine
+// feindliche Einheit in den vollen Bewegungsradius der patrouillierenden Einheit kommt
+// (nicht erst bei direktem Kontakt).
 function advancePatrol(unit){
   if(!unit.patrol || unit.moved || unit.hp<=0) return;
   const stats = UNIT_STATS[unit.type];
+  if(enemyWithinRadius(unit, stats.move)){
+    updateInfoPanel(`${ownerLabel(unit.owner)}: Patrouille unterbrochen — Feind im Bewegungsradius.`);
+    unit.patrol = null;
+    return;
+  }
   const animFromX = unit.x, animFromY = unit.y;
   let guard = 0;
   while(unit.patrol && unit.movesLeft>0 && guard<50){
@@ -972,7 +998,8 @@ function advancePatrol(unit){
     if((tile.type===T_CITY || tile.type===T_AIRPORT) && tile.owner!==unit.owner && stats.subclass==='land'){
       if(!tryCaptureStructure(unit, step.x, step.y)){ queueMoveAnim(unit, animFromX, animFromY); return; }
     }
-    if(adjacentTiles(unit.x,unit.y).some(t => pickDefenderAt(t.x,t.y,unit))){
+    if(enemyWithinRadius(unit, stats.move)){
+      updateInfoPanel(`${ownerLabel(unit.owner)}: Patrouille unterbrochen — Feind im Bewegungsradius.`);
       unit.patrol = null;
       break;
     }
@@ -1067,15 +1094,12 @@ function findNextIdleUnit(afterId){
   return idx>=0 ? list[idx] : list[0];
 }
 
-// TAB: zyklisch durch Einheiten mit laufendem Marschziel/Patrouille wechseln — also
-// "inaktive" Einheiten, die grundsätzlich noch handeln könnten. Rasten/Warten/Befestigt
-// sind bewusst ausgeschlossen: die wurden absichtlich geparkt, TAB soll nicht damit nerven.
+// TAB: zyklisch durch wirklich unerledigte Einheiten wechseln — identisch zur
+// Auto-Auswahl-Warteschlange. Rasten/Warten/Befestigt UND Einheiten mit laufendem
+// Marschziel/Patrouille sind ausgeschlossen: die sind bereits unterwegs bzw. geparkt,
+// TAB soll nicht damit nerven.
 function findNextInactiveUnit(afterId){
-  const list = unitsOf(OWNER_PLAYER).filter(u => u.destination || u.patrol).sort((a,b)=>a.id-b.id);
-  if(list.length===0) return null;
-  if(afterId==null) return list[0];
-  const idx = list.findIndex(u=>u.id>afterId);
-  return idx>=0 ? list[idx] : list[0];
+  return findNextIdleUnit(afterId);
 }
 
 // Schließt die Aktion einer Einheit ab und wählt automatisch die nächste unerledigte
@@ -1089,6 +1113,20 @@ function finishUnitTurn(unit){
     const next = findNextIdleUnit(finishedId);
     if(next) selectUnit(next);
   }
+}
+
+// Wie finishUnitTurn, wartet aber zuerst, bis eine laufende Bewegungsanimation dieser
+// Einheit fertig ist — so bleibt der Fokus/die Kamera auf der Einheit, bis sie ihr Ziel
+// sichtbar erreicht hat, statt schon während des Gleitens zur nächsten zu springen.
+function finishUnitTurnAfterAnim(unit){
+  if(unit && unit._animFrom){
+    const remaining = unit._animDuration - (performance.now() - unit._animStart);
+    if(remaining > 0){
+      setTimeout(() => finishUnitTurnAfterAnim(unit), remaining + 20);
+      return;
+    }
+  }
+  finishUnitTurn(unit);
 }
 
 function updateSelectionInfo(){
@@ -1408,7 +1446,7 @@ function handleGameClick(sx, sy){
         selectUnit(unit);
         checkGameOver(); updateHud();
       } else {
-        finishUnitTurn(unit);
+        finishUnitTurnAfterAnim(unit);
       }
     } else {
       renderUnitActions();
@@ -1444,7 +1482,7 @@ function handleGameClick(sx, sy){
       selectUnit(unit);
       checkGameOver(); updateHud();
     } else {
-      finishUnitTurn(unit);
+      finishUnitTurnAfterAnim(unit);
     }
     return;
   }
@@ -1503,6 +1541,7 @@ function handleGameClick(sx, sy){
     }
 
     if(attackableTiles.some(t=>t.x===x && t.y===y)){
+      const animFromX = selectedUnit.x, animFromY = selectedUnit.y;
       const def = pickDefenderAt(x,y,selectedUnit);
       if(def){
         const attackerSnap = snapshotUnit(selectedUnit);
@@ -1523,14 +1562,24 @@ function handleGameClick(sx, sy){
           } else {
             updateInfoPanel('Gegner besiegt — Einheit bleibt auf ihrem Feld.');
           }
-          if(units.includes(selectedUnit)){ selectedUnit.moved = true; selectedUnit.movesLeft = 0; selectedUnit.actedAtAll = true; }
+          if(units.includes(selectedUnit)){
+            selectedUnit.moved = true; selectedUnit.movesLeft = 0; selectedUnit.actedAtAll = true;
+            queueMoveAnim(selectedUnit, animFromX, animFromY);
+          }
         } else {
           updateInfoPanel('Eigene Einheit im Kampf verloren!');
         }
         const finishedUnit = selectedUnit;
-        playCombatSequence(attackerSnap, defenderSnap, () => finishUnitTurn(finishedUnit));
+        playCombatSequence(attackerSnap, defenderSnap, () => finishUnitTurnAfterAnim(finishedUnit));
         return;
       }
+      // Unbesetzte gegnerische/neutrale Stadt oder Flughafen: Städte verteidigen sich wie
+      // eine Infanterie-Einheit (natürliche Verteidigung) — das ist ein echter Kampf und
+      // bekommt daher dieselbe Blink+Sound-Sequenz wie ein Kampf gegen eine Einheit.
+      const attackerSnap = snapshotUnit(selectedUnit);
+      const cityOwnerBefore = map[y][x].owner;
+      const wasAirport = map[y][x].type===T_AIRPORT;
+      const defenderSnap = { x, y, type:'infantry', owner: cityOwnerBefore };
       const survived = tryCaptureStructure(selectedUnit, x, y);
       const capturedType = map[y][x].type;
       if(survived){
@@ -1539,8 +1588,17 @@ function handleGameClick(sx, sy){
       } else {
         updateInfoPanel('Angriff auf die Stadtverteidigung gescheitert — Einheit verloren!');
       }
-      if(units.includes(selectedUnit)){ selectedUnit.moved = true; selectedUnit.movesLeft = 0; selectedUnit.actedAtAll = true; }
-      finishUnitTurn(selectedUnit);
+      if(units.includes(selectedUnit)){
+        selectedUnit.moved = true; selectedUnit.movesLeft = 0; selectedUnit.actedAtAll = true;
+        queueMoveAnim(selectedUnit, animFromX, animFromY);
+      }
+      const finishedUnit = selectedUnit;
+      if(wasAirport){
+        // Flughäfen haben keine eigene Verteidigung — kein Kampf, nur die Bewegung zeigen.
+        finishUnitTurnAfterAnim(finishedUnit);
+      } else {
+        playCombatSequence(attackerSnap, defenderSnap, () => finishUnitTurnAfterAnim(finishedUnit));
+      }
       return;
     }
 
@@ -1556,6 +1614,7 @@ function handleGameClick(sx, sy){
       if(selectedUnit.movesLeft<=0) selectedUnit.moved = true;
       if(selectedUnit.destination) selectedUnit.destination = null;
 
+      let cityCombat = null; // {attackerSnap, defenderSnap} falls eine Stadtverteidigung bekämpft wurde
       if(hostAtDest && hostAtDest.cargo.length < UNIT_STATS[hostAtDest.type].portageCapacity){
         selectedUnit.hostId = hostAtDest.id;
         selectedUnit.orderState = null;
@@ -1568,10 +1627,18 @@ function handleGameClick(sx, sy){
         const destTile = map[y][x];
         if((destTile.type===T_CITY || destTile.type===T_AIRPORT) && destTile.owner!==selectedUnit.owner){
           if(stats.subclass==='land'){
-            const survived = tryCaptureStructure(selectedUnit, x, y);
-            updateInfoPanel(survived
-              ? (destTile.type===T_AIRPORT ? 'Flughafen erobert!' : 'Stadt erobert!')
-              : 'Angriff auf die Stadtverteidigung gescheitert — Einheit verloren!');
+            if(destTile.type===T_CITY){
+              // Auch beim Reinlaufen in eine unbesetzte Stadt kämpft die Einheit gegen
+              // deren Grundverteidigung — das soll genauso wie ein echter Kampf sichtbar sein.
+              const attackerSnap = snapshotUnit(selectedUnit);
+              const defenderSnap = { x, y, type:'infantry', owner: destTile.owner };
+              const survived = tryCaptureStructure(selectedUnit, x, y);
+              updateInfoPanel(survived ? 'Stadt erobert!' : 'Angriff auf die Stadtverteidigung gescheitert — Einheit verloren!');
+              cityCombat = { attackerSnap, defenderSnap };
+            } else {
+              tryCaptureStructure(selectedUnit, x, y);
+              updateInfoPanel('Flughafen erobert!');
+            }
           } else {
             updateInfoPanel('Angelegt – nur Landeinheiten erobern Städte.');
           }
@@ -1582,14 +1649,18 @@ function handleGameClick(sx, sy){
       }
       if(units.includes(selectedUnit)) queueMoveAnim(selectedUnit, animFromX, animFromY);
       const movedUnit = selectedUnit;
-      const stillSelectable = units.includes(movedUnit) && !movedUnit.moved;
-      if(stillSelectable){
-        deselect();
-        selectUnit(movedUnit);
-        checkGameOver(); updateHud();
-      } else {
-        finishUnitTurn(movedUnit);
-      }
+      const finish = () => {
+        const stillSelectable = units.includes(movedUnit) && !movedUnit.moved;
+        if(stillSelectable){
+          deselect();
+          selectUnit(movedUnit);
+          checkGameOver(); updateHud();
+        } else {
+          finishUnitTurnAfterAnim(movedUnit);
+        }
+      };
+      if(cityCombat) playCombatSequence(cityCombat.attackerSnap, cityCombat.defenderSnap, finish);
+      else finish();
       return;
     }
 
@@ -2237,6 +2308,8 @@ function updateHud(){
     chip.innerHTML = `<span class="hud-dot" style="background:${OWNER_COLORS[o]}"></span>${ownerLabel(o)}: <b>${citiesOf(o).length}</b> Städte / <b>${allUnitsOf(o).length}</b> Einh.${dead}`;
     center.appendChild(chip);
   }
+  const allMovedEl = document.getElementById('all-moved-indicator');
+  allMovedEl.classList.toggle('hidden', findNextIdleUnit(null) !== null);
 }
 function updateInfoPanel(text){
   document.getElementById('info-panel').textContent = text;
