@@ -3656,13 +3656,43 @@ function initGame(){
 const SAVE_SLOTS = 3;
 function saveKey(slot){ return `empire_save_slot_${slot}`; }
 
+// Speichert je Kachel nur vom Default abweichende Felder. Seit dem Enhanced-Update trägt
+// jede Kachel mehrere zusätzliche Overlay-Felder (rail/fortress/ruined/specialization...),
+// die auf großen/riesigen Karten (bis zu ~24000 Kacheln) bei voller Serialisierung allein
+// mehrere MB reines "false/null"-Rauschen erzeugen — das sprengt die localStorage-Quota.
+function serializeTile(t){
+  const c = { type: t.type };
+  if(t.owner) c.owner = t.owner;
+  if(t.buildPoints) c.buildPoints = t.buildPoints;
+  if(t.buildType && t.buildType!=='infantry') c.buildType = t.buildType;
+  if(t.capital) c.capital = true;
+  if(t.road) c.road = true;
+  if(t.rallyPoint) c.rallyPoint = t.rallyPoint;
+  if(t.rail) c.rail = true;
+  if(t.fortress) c.fortress = true;
+  if(t.ruined) c.ruined = true;
+  if(t.specialization) c.specialization = t.specialization;
+  if(t.pendingSpecialization) c.pendingSpecialization = t.pendingSpecialization;
+  if(t.specializationTimer) c.specializationTimer = t.specializationTimer;
+  return c;
+}
+
+// Ergänzt die beim Speichern weggelassenen Default-Felder wieder — v1-Spielstände
+// (vollständige Kachel-Objekte) laufen unverändert durch Object.assign durch.
+function deserializeTile(c){
+  return Object.assign(newTile(c.type), c);
+}
+
+const SAVE_VERSION = 2;
+
 function serializeGame(){
   return {
-    version: 1,
+    version: SAVE_VERSION,
     savedAt: Date.now(),
     mapConfig: JSON.parse(JSON.stringify(mapConfig)),
     COLS, ROWS,
-    map, units, unitIdCounter,
+    map: map.map(row => row.map(serializeTile)),
+    units, unitIdCounter,
     aiOwners, turnOrder, turnIndex, turnNumber, currentTurnOwner,
     gameOver, fogEnabled,
     exploredSet: [...exploredSet],
@@ -3679,7 +3709,12 @@ function saveGameToSlot(slot){
     localStorage.setItem(saveKey(slot), JSON.stringify(serializeGame()));
     return true;
   } catch(e){
-    alert('Speichern fehlgeschlagen: ' + e.message);
+    if(e.name==='QuotaExceededError'){
+      alert('Speichern fehlgeschlagen: Der lokale Speicherplatz des Browsers ist voll. ' +
+        'Lösche einen der anderen Spielstände (oder Spielstände aus anderen Spielen/Seiten) und versuche es erneut.');
+    } else {
+      alert('Speichern fehlgeschlagen: ' + e.message);
+    }
     return false;
   }
 }
@@ -3692,7 +3727,9 @@ function loadGameFromSlot(slot){
 
   mapConfig = data.mapConfig;
   COLS = data.COLS; ROWS = data.ROWS;
-  map = data.map;
+  // v1-Spielstände enthalten bereits vollständige Kachel-Objekte, v2+ nur die vom Default
+  // abweichenden Felder (siehe serializeTile) — beide Formate bleiben ladbar.
+  map = (data.version >= 2) ? data.map.map(row => row.map(deserializeTile)) : data.map;
   units = data.units;
   unitIdCounter = data.unitIdCounter;
   aiOwners = data.aiOwners;
