@@ -58,6 +58,7 @@ const SIZE_PRESETS = {
   medium: { cols:52, rows:34 },
   large:  { cols:68, rows:44 },
   huge:   { cols:136, rows:88 }, // vierfache Fläche von "Groß"
+  giant:  { cols:192, rows:124 }, // doppelte Fläche von "Sehr Groß"
   archipelago: { cols:192, rows:124 } // doppelte Fläche von "Sehr Groß", feste Größe
 };
 const CITY_TILES_PER_CITY = { sparse:70, normal:44, dense:28 };
@@ -3042,8 +3043,8 @@ function updateHud(){
     const row = document.createElement('div');
     row.className = 'owner-row' + (isEliminated(o) ? ' owner-dead' : '') + (o===coalitionAgainst ? ' owner-dominant' : '');
     row.innerHTML = `<span class="owner-name" style="color:${OWNER_COLORS[o]}">${ownerLabel(o)}</span>` +
-      `<span class="owner-stat">🏙${citiesOf(o).length}</span>` +
-      `<span class="owner-stat">⚔${allUnitsOf(o).length}</span>`;
+      `<span class="owner-stat">🏙 ${citiesOf(o).length}</span>` +
+      `<span class="owner-stat">⚔ ${allUnitsOf(o).length}</span>`;
     ownerPanel.appendChild(row);
   }
   const pendingCount = unitsOf(OWNER_PLAYER).filter(isUnitPending).length;

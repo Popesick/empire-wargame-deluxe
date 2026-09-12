@@ -361,29 +361,35 @@ html,body{
   color:#c8d0e0;
 }
 
+/* Schwebende Aktionsleiste links über der Karte statt einer festen Leiste unten —
+   erscheint nur, wenn eine Einheit tatsächlich Aktionen anzubieten hat. */
 #unit-actions{
+  position:absolute;
+  top:12px;
+  left:12px;
+  z-index:5;
   display:flex;
+  flex-direction:column;
   gap:8px;
-  flex-wrap:wrap;
-  padding:0 18px 10px 18px;
-  background:var(--panel);
-  border-top:3px solid var(--panel-border);
-  min-height:20px;
+  max-height:calc(100% - 160px); /* lässt Platz für die Minimap unten links */
+  overflow-y:auto;
+  overflow-x:hidden;
 }
 
 #unit-actions:empty{
-  padding:0 18px;
-  border-top:none;
+  display:none;
 }
 
 .unit-action-btn{
   font-family:'VT323', monospace;
   font-size:17px;
-  padding:6px 14px;
-  background:#1c2740;
+  padding:8px 14px;
+  background:rgba(28,39,64,0.9);
   border:2px solid var(--panel-border);
   color:var(--text);
   cursor:pointer;
+  white-space:nowrap;
+  box-shadow:0 2px 6px rgba(0,0,0,0.4);
 }
 
 .unit-action-btn:hover{
