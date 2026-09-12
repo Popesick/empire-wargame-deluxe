@@ -35,8 +35,8 @@
   <div class="setup-group">
     <span class="setup-label">Regelwerk</span>
     <div class="setup-options" data-group="mode">
-      <button class="setup-opt active" data-value="classic">Classic</button>
-      <button class="setup-opt" data-value="enhanced">Enhanced</button>
+      <button class="setup-opt active" data-value="classic" title="Das klassische Regelwerk ohne Zusatzfunktionen.">Classic</button>
+      <button class="setup-opt" data-value="enhanced" title="Enhanced: Ingenieure (Straßen/Eisenbahn/Festungen/Radar), Einheiten-Erfahrung mit Levelaufstieg, Stadt-Spezialisierung, Verbrannte Erde und ein Bündnis der Schwachen gegen einen übermächtigen Gegner.">Enhanced</button>
     </div>
   </div>
 
@@ -109,7 +109,7 @@
   </div>
   </div>
 
-  <p class="setup-hint">Enhanced: Ingenieure (Straßen/Eisenbahn/Festungen/Radar), Einheiten-Erfahrung mit Levelaufstieg, Stadt-Spezialisierung, Verbrannte Erde und ein Bündnis der Schwachen gegen einen übermächtigen Gegner. Inseln: Landmassen sind getrennt, Landeinheiten brauchen Schiffe zum Übersetzen (auch die KI). Archipel: doppelt so groß wie Sehr Groß (Kartengröße fest), großer Kontinent in der Mitte umgeben von 8 Inseln, auf denen Spieler und KI-Gegner starten. Keine Diplomatie in Classic — alle gegen alle.</p>
+  <p class="setup-hint">Inseln: Landmassen sind getrennt, Landeinheiten brauchen Schiffe zum Übersetzen (auch die KI). Archipel: doppelt so groß wie Sehr Groß (Kartengröße fest), großer Kontinent in der Mitte umgeben von 8 Inseln, auf denen Spieler und KI-Gegner starten. Keine Diplomatie in Classic — alle gegen alle.</p>
 
   <div class="menu">
     <button id="setup-start-btn">▶ Spiel starten</button>
@@ -123,12 +123,12 @@
     <div id="hud-left">
       <span id="turn-indicator">Runde 1 — Dein Zug</span>
     </div>
-    <div id="hud-center"></div>
     <div id="hud-right">
       <button id="save-load-btn" title="Speichern / Laden">💾</button>
       <button id="info-btn" title="Einheiten-Übersicht">ℹ Einheiten</button>
       <button id="zoom-out-btn" title="Rauszoomen">－</button>
       <button id="zoom-in-btn" title="Reinzoomen">＋</button>
+      <button id="minimap-toggle-btn" title="Minimap ein-/ausblenden">🗺</button>
       <button id="home-btn" title="Zur Hauptstadt">🏠</button>
       <button id="mute-btn-2">🔊</button>
       <button id="end-turn-btn">Zug beenden ⏭</button>
@@ -139,6 +139,7 @@
   <div id="map-wrap">
     <canvas id="game-canvas"></canvas>
     <canvas id="minimap-canvas" width="190" height="126" title="Klicken zum Springen"></canvas>
+    <div id="owner-panel"></div>
 
     <div id="build-panel" class="hidden">
       <div class="build-panel-header">

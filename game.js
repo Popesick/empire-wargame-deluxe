@@ -1251,11 +1251,11 @@ function advanceWaypoint(unit){
       const arrivedFromRally = !!unit.destination.fromRally;
       unit.destination=null;
       const arrTile = map[unit.y][unit.x];
-      // Nur per SAMMELPUNKT in eine eigene Stadt geschickte Infanterie/Panzer gehen dort
-      // automatisch in Warten. Ein manuell gesetztes Marschziel [G] lässt die Einheit nach
-      // Ankunft weiter frei wählbar, genau wie eine normale Bewegung per Klick.
+      // Nur per SAMMELPUNKT in eine eigene Stadt geschickte Infanterie/Panzer/Artillerie
+      // gehen dort automatisch in Warten. Ein manuell gesetztes Marschziel [G] lässt die
+      // Einheit nach Ankunft weiter frei wählbar, genau wie eine normale Bewegung per Klick.
       if(arrivedFromRally && (arrTile.type===T_CITY || arrTile.type===T_AIRPORT) && arrTile.owner===unit.owner &&
-         (unit.type==='infantry' || unit.type==='tank')){
+         (unit.type==='infantry' || unit.type==='tank' || unit.type==='artillery')){
         unit.orderState = 'waiting';
         unit.moved = true; unit.movesLeft = 0;
       }
@@ -1532,10 +1532,14 @@ function renderUnitActions(){
   if(!selectedUnit || currentTurnOwner!==OWNER_PLAYER){ return; }
   const u = selectedUnit, s = UNIT_STATS[u.type];
 
-  const addBtn = (label, onClick, toggled) => {
+  // Buttons zeigen nur Icon (+ Hotkey, falls vorhanden) — die volle Beschreibung steht im
+  // title-Tooltip. Die Tastenbelegung ist ohnehin auf dem Button selbst sichtbar, ein
+  // ausgeschriebenes Label daneben kostet auf kleinen Bildschirmen nur Platz.
+  const addBtn = (label, onClick, toggled, title) => {
     const b = document.createElement('button');
     b.className = 'unit-action-btn' + (toggled?' toggled':'');
     b.textContent = label;
+    if(title) b.title = title;
     if(onClick) b.addEventListener('click', onClick);
     bar.appendChild(b);
   };
@@ -1544,98 +1548,100 @@ function renderUnitActions(){
   // restlichen Aktionen, bekommt aber (als einzige Ausnahme zu u.moved) einen
   // Abbrechen-Button, damit der Auftrag jederzeit aufgehoben werden kann.
   if(u.buildOrder){
-    addBtn(`🚧 Baut ${ENGINEER_BUILD_LABEL[u.buildOrder.type]||''}... (${Math.ceil(u.buildOrder.turnsLeft)} Runde${Math.ceil(u.buildOrder.turnsLeft)===1?'':'n'}) — Abbrechen`,
-      () => cancelEngineerBuild(u));
+    const turnsLeft = Math.ceil(u.buildOrder.turnsLeft);
+    addBtn(`🚧${turnsLeft} ✕`, () => cancelEngineerBuild(u), false,
+      `Baut ${ENGINEER_BUILD_LABEL[u.buildOrder.type]||''}... (${turnsLeft} Runde${turnsLeft===1?'':'n'}) — Klicken zum Abbrechen`);
     return;
   }
   if(u.moved) return;
 
-  addBtn('🎯 Marschziel [G]', () => {
+  addBtn('🎯 G', () => {
     awaitingWaypointClick = true;
     updateInfoPanel('Zielpunkt auf der Karte anklicken (auch außerhalb der Reichweite)...');
-  }, awaitingWaypointClick);
+  }, awaitingWaypointClick, 'Marschziel setzen [G]');
 
-  addBtn('🔁 Patrouille [P]', () => {
+  addBtn('🔁 P', () => {
     awaitingPatrolStep = 1;
     patrolPointA = null;
     updateInfoPanel('Patrouille: ersten Wegpunkt anklicken...');
-  }, awaitingPatrolStep>0);
+  }, awaitingPatrolStep>0, 'Patrouille [P]');
 
-  addBtn('💤 Rasten [R]', () => commandOrderState(u, 'resting'));
-  addBtn('⏸ Warten [W]', () => commandOrderState(u, 'waiting'));
-  addBtn('⏭ Pass [X]', () => commandPass(u));
+  addBtn('💤 R', () => commandOrderState(u, 'resting'), false, 'Rasten [R]');
+  addBtn('⏸ W', () => commandOrderState(u, 'waiting'), false, 'Warten [W]');
+  addBtn('⏭ X', () => commandPass(u), false, 'Diese Runde aussetzen [X]');
 
   if(s.canDigIn && !u.dugIn && u.digPending!=='in'){
-    addBtn('⛏ Befestigen [B]', () => commandFortify(u));
+    addBtn('⛏ B', () => commandFortify(u), false, 'Befestigen (Eingraben) [B]');
   }
   if(u.type==='infantry' && [T_PLAIN,T_FOREST,T_HILLS].includes(map[u.y][u.x].type)){
-    addBtn('🛬 Flughafen bauen', () => {
+    addBtn('🛬', () => {
       const tile = map[u.y][u.x];
       tile.type = T_AIRPORT;
       tile.owner = u.owner;
       updateInfoPanel('Flughafen errichtet — die Infanterie wurde dabei aufgelöst.');
       destroyUnit(u);
       finishUnitTurn(u);
-    });
+    }, false, 'Flughafen bauen (Infanterie wird dabei aufgelöst)');
   }
   if(u.dugIn){
-    addBtn('⛏ Ausgraben', () => {
+    addBtn('⛏↩', () => {
       u.digPending = 'out';
       u.moved = true; u.movesLeft = 0; u.actedAtAll = true;
       updateInfoPanel('Gräbt sich aus — nächste Runde wieder beweglich.');
       finishUnitTurn(u);
-    });
+    }, false, 'Ausgraben');
   }
   if(s.range > 0 && rangedTiles.length>0){
-    addBtn('🎯 Fernkampf aktiv', null, true);
+    addBtn('🏹', null, true, 'Fernkampf aktiv');
   }
   if(s.canDive){
     if(u.subLevel==='surface'){
-      addBtn('🌊 Tauchen', () => {
+      addBtn('🌊', () => {
         u.subLevel = 'deep';
         u.moved = true; u.movesLeft = 0; u.actedAtAll = true;
         updateInfoPanel('U-Boot taucht ab — nur noch von Boden-/U-Boot-Einheiten angreifbar.');
         finishUnitTurn(u);
-      });
+      }, false, 'Tauchen');
     } else {
-      addBtn('⬆ Auftauchen', () => {
+      addBtn('⬆', () => {
         u.subLevel = 'surface';
         u.moved = true; u.movesLeft = 0; u.actedAtAll = true;
         updateInfoPanel('U-Boot taucht auf.');
         finishUnitTurn(u);
-      });
+      }, false, 'Auftauchen');
     }
   }
   if(u.cargo && u.cargo.length>0){
     for(const cid of u.cargo){
       const cu = units.find(x=>x.id===cid);
       if(!cu) continue;
-      addBtn(`📦 Entladen: ${UNIT_STATS[cu.type].name}`, () => startUnload(u, cu));
+      const cuName = UNIT_STATS[cu.type].name;
+      addBtn(`📦 ${cuName.slice(0,3)}`, () => startUnload(u, cu), false, `Entladen: ${cuName}`);
     }
   }
 
   if(isEnhanced() && u.type==='engineer'){
     const eTile = map[u.y][u.x];
     const buildableGround = [T_PLAIN,T_FOREST,T_HILLS,T_MOUNTAIN].includes(eTile.type);
-    addBtn('🛣️ Straße bauen', () => {
+    addBtn('🛣️', () => {
       awaitingEngineerOrder = { kind:'road' };
       updateInfoPanel('Zielpunkt für die Straße anklicken...');
-    }, awaitingEngineerOrder && awaitingEngineerOrder.kind==='road');
-    addBtn('🚆 Eisenbahn bauen', () => {
+    }, awaitingEngineerOrder && awaitingEngineerOrder.kind==='road', 'Straße bauen');
+    addBtn('🚆', () => {
       awaitingEngineerOrder = { kind:'rail' };
       updateInfoPanel('Zielpunkt für die Eisenbahn anklicken...');
-    }, awaitingEngineerOrder && awaitingEngineerOrder.kind==='rail');
+    }, awaitingEngineerOrder && awaitingEngineerOrder.kind==='rail', 'Eisenbahn bauen');
     if(buildableGround && !eTile.fortress){
-      addBtn('🏰 Festung bauen (5 Runden)', () => startEngineerBuild(u, 'fortress', 5));
+      addBtn('🏰', () => startEngineerBuild(u, 'fortress', 5), false, 'Festung bauen (5 Runden)');
     }
     if(fogEnabled && buildableGround && eTile.type!==T_RADAR){
-      addBtn('📡 Radar bauen (5 Runden)', () => startEngineerBuild(u, 'radar', 5));
+      addBtn('📡', () => startEngineerBuild(u, 'radar', 5), false, 'Radar bauen (5 Runden)');
     }
     if([T_PLAIN,T_FOREST,T_HILLS].includes(eTile.type)){
-      addBtn('🛬 Flughafen bauen (2 Runden)', () => startEngineerBuild(u, 'airport', 2));
+      addBtn('🛬', () => startEngineerBuild(u, 'airport', 2), false, 'Flughafen bauen (2 Runden)');
     }
     if(eTile.type===T_CITY && eTile.ruined){
-      addBtn('🏗️ Stadt wiederaufbauen (15 Runden)', () => startEngineerBuild(u, 'rebuild', 15));
+      addBtn('🏗️', () => startEngineerBuild(u, 'rebuild', 15), false, 'Stadt wiederaufbauen (15 Runden)');
     }
   }
 }
@@ -1769,6 +1775,11 @@ document.getElementById('home-btn').addEventListener('click', () => {
   const caps = citiesOf(OWNER_PLAYER).filter(c => map[c.y][c.x].capital);
   const cap = caps[0] || citiesOf(OWNER_PLAYER)[0];
   if(cap) centerCameraOn(cap.x*BASE_TILE + BASE_TILE/2, cap.y*BASE_TILE + BASE_TILE/2);
+});
+let minimapVisible = true;
+document.getElementById('minimap-toggle-btn').addEventListener('click', () => {
+  minimapVisible = !minimapVisible;
+  document.getElementById('minimap-canvas').classList.toggle('hidden', !minimapVisible);
 });
 
 window.addEventListener('keydown', (evt) => {
@@ -2856,14 +2867,15 @@ function endGame(won, text){
 function updateHud(){
   document.getElementById('turn-indicator').textContent =
     `Runde ${turnNumber} — ${currentTurnOwner===OWNER_PLAYER ? 'Dein Zug' : ownerLabel(currentTurnOwner)+' zieht...'}`;
-  const center = document.getElementById('hud-center');
-  center.innerHTML = '';
+  const ownerPanel = document.getElementById('owner-panel');
+  ownerPanel.innerHTML = '';
   for(const o of activeOwners()){
-    const chip = document.createElement('span');
-    chip.className = 'hud-chip';
-    const dead = isEliminated(o) ? ' (besiegt)' : '';
-    chip.innerHTML = `<span class="hud-dot" style="background:${OWNER_COLORS[o]}"></span>${ownerLabel(o)}: <b>${citiesOf(o).length}</b> Städte / <b>${allUnitsOf(o).length}</b> Einh.${dead}`;
-    center.appendChild(chip);
+    const row = document.createElement('div');
+    row.className = 'owner-row' + (isEliminated(o) ? ' owner-dead' : '');
+    row.innerHTML = `<span class="owner-name" style="color:${OWNER_COLORS[o]}">${ownerLabel(o)}</span>` +
+      `<span class="owner-stat">🏙${citiesOf(o).length}</span>` +
+      `<span class="owner-stat">⚔${allUnitsOf(o).length}</span>`;
+    ownerPanel.appendChild(row);
   }
   const pendingCount = unitsOf(OWNER_PLAYER).filter(isUnitPending).length;
   const counterEl = document.getElementById('units-to-move-counter');
