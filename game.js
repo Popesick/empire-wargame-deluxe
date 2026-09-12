@@ -253,8 +253,18 @@ function ensureAnimLoop(){
   if(animRafRunning) return;
   animRafRunning = true;
   function loop(){
+    // Ablaufene Animationen hier zentral für ALLE Einheiten beenden, nicht erst beim
+    // Zeichnen (drawUnit) — sonst bleibt _animFrom für Einheiten außerhalb des
+    // Kamera-Ausschnitts oder unter Nebel des Krieges (die nie gezeichnet werden) für
+    // immer hängen, obwohl ihre Animation längst vorbei ist.
+    const now = performance.now();
+    let stillAnimating = false;
+    for(const u of units){
+      if(!u._animFrom) continue;
+      if(now - u._animStart < u._animDuration) stillAnimating = true;
+      else u._animFrom = null;
+    }
     render();
-    const stillAnimating = units.some(u => u._animFrom && (performance.now()-u._animStart < u._animDuration));
     if(stillAnimating) requestAnimationFrame(loop);
     else animRafRunning = false;
   }
@@ -998,15 +1008,25 @@ const ENHANCED_MATCHUPS = {
   fighter:    { helicopter:15, battleship:-15, destroyer:-15 }
 };
 
-// Enhanced: gibt es eine eigene Radarstation der Einheit im Umkreis RADAR_SIGHT_RANGE?
-function isNearOwnRadar(unit){
+// Enhanced: Positionen aller Radarstationen, einmal pro Zugwechsel aktualisiert (siehe
+// refreshRadarPositions/advanceTurn) — vermeidet einen kompletten Kartenscan bei JEDER
+// Trefferchancen-Berechnung bzw. jeder KI-Ingenieur-Entscheidung, was auf großen Karten
+// (z.B. "Riesig", 192x124 Felder) spürbar zu Buche schlug.
+let radarPositions = [];
+function refreshRadarPositions(){
+  radarPositions = [];
+  if(!isEnhanced()) return;
   for(let y=0;y<ROWS;y++){
     for(let x=0;x<COLS;x++){
-      if(map[y][x].type===T_RADAR && map[y][x].owner===unit.owner &&
-         Math.max(Math.abs(x-unit.x), Math.abs(y-unit.y)) <= RADAR_SIGHT_RANGE) return true;
+      if(map[y][x].type===T_RADAR) radarPositions.push({x, y, owner:map[y][x].owner});
     }
   }
-  return false;
+}
+
+// Enhanced: gibt es eine eigene Radarstation der Einheit im Umkreis RADAR_SIGHT_RANGE?
+function isNearOwnRadar(unit){
+  return radarPositions.some(r => r.owner===unit.owner &&
+    Math.max(Math.abs(r.x-unit.x), Math.abs(r.y-unit.y)) <= RADAR_SIGHT_RANGE);
 }
 
 function hitChance(attacker, defender, attackerCrippled){
@@ -2589,6 +2609,7 @@ function advanceTurn(){
   if(turnIndex >= turnOrder.length){ turnIndex = 0; turnNumber++; }
   currentTurnOwner = turnOrder[turnIndex];
   updateCoalitionState();
+  refreshRadarPositions();
 
   if(currentTurnOwner === OWNER_PLAYER){
     processOrderStates(OWNER_PLAYER);
@@ -2608,10 +2629,25 @@ function advanceTurn(){
   setTimeout(() => runAiOwnerTurn(currentTurnOwner), 350);
 }
 
+// Ein einziger Kartendurchlauf statt eines Scans pro Partei (wie es citiesOf(o) einzeln
+// je Partei täte) — auf großen Karten ("Riesig", 192x124 Felder) macht das bei 5 Parteien
+// den Unterschied zwischen einem und fünf vollen Grid-Scans pro Zugwechsel.
+function countCitiesByOwner(){
+  const counts = {}; let total = 0;
+  for(let y=0;y<ROWS;y++){
+    for(let x=0;x<COLS;x++){
+      const t = map[y][x];
+      if(t.type===T_CITY && !t.ruined){
+        total++;
+        if(t.owner) counts[t.owner] = (counts[t.owner]||0) + 1;
+      }
+    }
+  }
+  return { counts, total };
+}
+
 function totalCapturableCities(){
-  let n = 0;
-  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++) if(map[y][x].type===T_CITY && !map[y][x].ruined) n++;
-  return n;
+  return countCitiesByOwner().total;
 }
 
 // Enhanced: 70%-Dominanz-Regel — kontrolliert eine Partei 70% oder mehr aller (nicht
@@ -2620,9 +2656,9 @@ function totalCapturableCities(){
 // Anteil (z.B. durch Rückeroberung) wieder unter 70% fällt.
 function updateCoalitionState(){
   if(!isEnhanced()){ coalitionAgainst = null; return; }
-  const total = totalCapturableCities();
+  const { counts, total } = countCitiesByOwner();
   if(total===0){ coalitionAgainst = null; return; }
-  coalitionAgainst = activeOwners().find(o => citiesOf(o).length / total >= 0.70) || null;
+  coalitionAgainst = activeOwners().find(o => (counts[o]||0) / total >= 0.70) || null;
 }
 
 // Neutrale Städte haben keine eigene Partei und stehen daher nie im Bündnis.
@@ -2788,8 +2824,7 @@ function aiActUnit(unit){
 
 /* ---------- ENHANCED: KI-INGENIEUR ---------- */
 function ownerHasRadar(owner){
-  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++) if(map[y][x].type===T_RADAR && map[y][x].owner===owner) return true;
-  return false;
+  return radarPositions.some(r => r.owner===owner);
 }
 
 // Bewegt den Ingenieur (ohne Kampf) so weit wie möglich in Richtung target und beendet
@@ -3625,6 +3660,8 @@ function initGame(){
   dragPreviewTarget = null;
   gameOver = false;
   minimapTerrainCanvas = null;
+  coalitionAgainst = null;
+  radarPositions = [];
   closeBuildPanel();
   document.getElementById('unit-info-panel').classList.add('hidden');
   document.getElementById('game-over').classList.add('hidden');
@@ -3741,6 +3778,8 @@ function loadGameFromSlot(slot){
   fogEnabled = !!data.fogEnabled;
   exploredSet = new Set(data.exploredSet || []);
   visibleSet = new Set();
+  updateCoalitionState();
+  refreshRadarPositions();
 
   selectedUnit = null;
   reachableTiles = []; attackableTiles = []; rangedTiles = []; rangeRadiusTiles = []; unloadTiles = [];
