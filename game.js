@@ -750,7 +750,7 @@ function getLevel(u){
   return 'ground';
 }
 function effName(u){ return EFFECTIVENESS_NAME[EFFECTIVENESS[u.effectiveness]]; }
-function isCrippled(u){ return u.hp <= UNIT_STATS[u.type].hp/2; }
+function isCrippled(u){ return u.hp <= effStat(u,'hp')/2; }
 function isEliminated(owner){ return citiesOf(owner).length===0 && allUnitsOf(owner).length===0; }
 function ownerLabel(owner){ return OWNER_LABEL[owner] || owner; }
 
@@ -993,7 +993,7 @@ function isNearOwnRadar(unit){
 
 function hitChance(attacker, defender, attackerCrippled){
   const a = UNIT_STATS[attacker.type], d = UNIT_STATS[defender.type];
-  let chance = 50 + (a.power - d.defense) * 0.6;
+  let chance = 50 + (effStat(attacker,'power') - effStat(defender,'defense')) * 0.6;
   chance += effDiff(defender, attacker) * 5;
   if(defender.dugIn) chance -= 15;
   if(attackerCrippled) chance -= 15;
@@ -1019,6 +1019,37 @@ function grantExperience(u){
   u.xpWins++;
   if(u.experience==='green' && u.xpWins >= EXPERIENCE_WINS_NEEDED.proven) u.experience='proven';
   else if(u.experience==='proven' && u.xpWins >= EXPERIENCE_WINS_NEEDED.hardened) u.experience='hardened';
+  // Enhanced-Veteranensystem läuft parallel zum bestehenden Grün/Erprobt/Abgehärtet-System
+  // und wird an derselben Stelle ausgelöst (jeder echte Einheiten-Kill) — Classic bleibt
+  // unverändert, da grantKillXp() bei !isEnhanced() sofort zurückkehrt.
+  if(isEnhanced()) grantKillXp(u);
+}
+
+// 20 XP je besiegtem Gegner, alle 100 XP ein Levelaufstieg (max. Level 20). Jedes Level
+// erhöht abwechselnd Angriff (power), Verteidigung (defense), Lebenspunkte (hp) und
+// Bewegung (move) um 1 — siehe effStat() für die Anwendung. Ein HP-Levelaufstieg heilt
+// die Einheit zusätzlich um den Zuwachs, sonst "hinkt" ihr aktuelles HP dem neuen Max hinterher.
+const LEVEL_STAT_CYCLE = ['power','defense','hp','move'];
+function grantKillXp(u){
+  if(u.killXp===undefined) return; // Sicherheitsnetz für ältere Speicherstände ohne das Feld
+  u.killXp += 20;
+  while(u.killXp >= 100 && u.level < 20){
+    u.killXp -= 100;
+    u.level++;
+    if(LEVEL_STAT_CYCLE[(u.level-1) % 4]==='hp') u.hp += 1;
+  }
+}
+
+// Effektiver Statwert inkl. Enhanced-Levelbonus. In Classic (oder für Einheiten ohne
+// level-Feld, z.B. die virtuelle Stadtverteidigung) identisch zum UNIT_STATS-Basiswert.
+function effStat(unit, stat){
+  const base = UNIT_STATS[unit.type][stat];
+  if(!isEnhanced() || !unit.level) return base;
+  let bonus = 0;
+  for(let lvl=1; lvl<=unit.level; lvl++){
+    if(LEVEL_STAT_CYCLE[(lvl-1)%4]===stat) bonus++;
+  }
+  return base + bonus;
 }
 
 function destroyUnit(u){
@@ -1087,7 +1118,7 @@ function captureCity(x,y, owner, capturingUnit, deferMorph){
   tile.buildType = 'infantry';
   tile.rallyPoint = null;
   const stats = UNIT_STATS[capturingUnit.type];
-  if(stats.captureMorph && capturingUnit.hp >= stats.hp){
+  if(stats.captureMorph && capturingUnit.hp >= effStat(capturingUnit,'hp')){
     if(deferMorph) capturingUnit.pendingCaptureMorph = { owner, x, y, type: stats.captureMorph };
     else { destroyUnit(capturingUnit); spawnUnit(owner, stats.captureMorph, x, y); }
   }
@@ -1275,7 +1306,7 @@ function enemyWithinRadius(unit, radius){
 function advancePatrol(unit){
   if(!unit.patrol || unit.moved || unit.hp<=0) return;
   const stats = UNIT_STATS[unit.type];
-  if(enemyWithinRadius(unit, stats.move)){
+  if(enemyWithinRadius(unit, effStat(unit,'move'))){
     updateInfoPanel(`${ownerLabel(unit.owner)}: Patrouille unterbrochen — Feind im Bewegungsradius.`);
     unit.patrol = null;
     return;
@@ -1312,7 +1343,7 @@ function advancePatrol(unit){
     if((tile.type===T_CITY || tile.type===T_AIRPORT || tile.type===T_RADAR) && tile.owner!==unit.owner && stats.subclass==='land'){
       if(!tryCaptureStructure(unit, step.x, step.y)){ queueMoveAnim(unit, animFromX, animFromY); return; }
     }
-    if(enemyWithinRadius(unit, stats.move)){
+    if(enemyWithinRadius(unit, effStat(unit,'move'))){
       updateInfoPanel(`${ownerLabel(unit.owner)}: Patrouille unterbrochen — Feind im Bewegungsradius.`);
       unit.patrol = null;
       break;
@@ -1333,8 +1364,8 @@ function selectUnit(u){
     // schon (teilweise) bewegt und wurde DANACH z.B. auf Warten gesetzt, bleiben die
     // bereits verbrauchten Bewegungspunkte verbraucht — kein Nachschub durchs Aufwecken.
     if(!u.actedAtAll){
-      const s = UNIT_STATS[u.type];
-      u.movesLeft = isCrippled(u) ? Math.max(1, Math.floor(s.move/2)) : s.move;
+      const fullMove = effStat(u,'move');
+      u.movesLeft = isCrippled(u) ? Math.max(1, Math.floor(fullMove/2)) : fullMove;
     }
     u.moved = u.movesLeft<=0;
   }
@@ -1462,10 +1493,13 @@ function finishUnitTurnAfterAnim(unit){
   finishUnitTurn(unit);
 }
 
+// Bewusst auf die Basics beschränkt — Farbcodes/Hotkeys stehen schon auf den Buttons,
+// eine Wiederholung als Text kostet nur Platz.
 function updateSelectionInfo(){
   if(!selectedUnit){ updateInfoPanel('Wähle eine Einheit aus, um sie zu bewegen oder anzugreifen.'); return; }
   const u = selectedUnit, s = UNIT_STATS[u.type];
-  let parts = [`${s.name} ausgewählt`, `HP ${u.hp}/${s.hp}`, `Bew ${u.movesLeft}/${s.move}`, effName(u), EXPERIENCE_NAME[u.experience]];
+  let parts = [`${s.name} ausgewählt`, `HP ${u.hp}/${effStat(u,'hp')}`, `Bew ${u.movesLeft}/${effStat(u,'move')}`, effName(u), EXPERIENCE_NAME[u.experience]];
+  if(isEnhanced() && u.level>0) parts.push(`Lvl ${u.level} (${u.killXp}/100 XP)`);
   if(s.fuel !== undefined) parts.push(`Sprit ${u.fuel}/${s.fuel}`);
   if(u.dugIn) parts.push('Befestigt');
   if(isCrippled(u)) parts.push('Angeschlagen');
@@ -1473,7 +1507,7 @@ function updateSelectionInfo(){
   if(u.cargo && u.cargo.length) parts.push(`Fracht ${u.cargo.length}/${s.portageCapacity}`);
   if(u.destination) parts.push('Marschbefehl aktiv');
   if(u.patrol) parts.push('Patrouille aktiv');
-  updateInfoPanel(parts.join(' | ') + '. Blau=Bewegen, Rot=Angriff/Erobern, Orange=Fernkampf. [G]=Marschziel, [P]atrouille, [R]asten [W]arten [B]efestigen [X]=Pass.');
+  updateInfoPanel(parts.join(' | '));
 }
 
 function deselect(){
@@ -2320,14 +2354,16 @@ function processEndOfTurnUnitState(owner){
       const cap = EXPERIENCE_CAP[u.experience];
       u.effectiveness = Math.max(cap, u.effectiveness-1);
       const tile = map[u.y][u.x];
-      if((tile.type===T_CITY || tile.type===T_AIRPORT) && tile.owner===owner && u.hp < s.hp){
-        u.hp = s.hp;
+      const maxHp = effStat(u,'hp');
+      if((tile.type===T_CITY || tile.type===T_AIRPORT) && tile.owner===owner && u.hp < maxHp){
+        u.hp = maxHp;
       }
     }
     if(u.digPending==='in'){ u.dugIn = true; u.digPending = null; }
     else if(u.digPending==='out'){ u.dugIn = false; u.digPending = null; }
     u.moved = false;
-    u.movesLeft = isCrippled(u) ? Math.max(1, Math.floor(s.move/2)) : s.move;
+    const fullMove = effStat(u,'move');
+    u.movesLeft = isCrippled(u) ? Math.max(1, Math.floor(fullMove/2)) : fullMove;
     u.firedThisTurn = false;
     u.foughtThisTurn = false;
     u.actedAtAll = false;
@@ -2343,7 +2379,7 @@ function processOrderStates(owner){
     if(u.buildOrder){ u.moved = true; u.movesLeft = 0; continue; }
     if(!u.orderState) continue;
     const enemyAdjacent = adjacentTiles(u.x,u.y).some(t => pickDefenderAt(t.x,t.y,u));
-    const fullyHealed = u.orderState==='resting' && u.hp >= UNIT_STATS[u.type].hp;
+    const fullyHealed = u.orderState==='resting' && u.hp >= effStat(u,'hp');
     if(enemyAdjacent || fullyHealed){
       u.orderState = null;
       u.moved = false;
@@ -3263,7 +3299,7 @@ function drawUnit(u, tsz){
   gctx.textBaseline = 'middle';
   gctx.fillText(s.label, cx, cy+1);
 
-  const maxHp = s.hp;
+  const maxHp = effStat(u,'hp');
   const barW = tsz*0.6;
   const barX = cx-barW/2;
   const barY = py+tsz*0.86;
