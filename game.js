@@ -132,6 +132,22 @@ const BUILD_ORDER = ['infantry','tank','artillery','destroyer','transport','batt
 // Gewichtung/Einheiten-Übersicht die buildbaren Typen auflisten, statt BUILD_ORDER direkt.
 function buildOrderFor(){ return isEnhanced() ? [...BUILD_ORDER, 'engineer'] : BUILD_ORDER; }
 
+// Enhanced: Stadt-Spezialisierung — passende Einheitentypen werden 20% günstiger/schneller
+// gebaut. Umbauzeit: 10 Runden bei erstmaliger Wahl, 15 Runden beim Wechsel einer
+// bestehenden Spezialisierung; in der Zeit läuft keine Produktion (siehe processCityProduction).
+const CITY_SPECIALIZATIONS = {
+  arms:    { name:'Rüstungsindustrie', icon:'⚔️', types:['infantry','tank','artillery'] },
+  airbase: { name:'Flugwerft',         icon:'🛩️', types:['fighter','helicopter'] },
+  harbor:  { name:'Hafen',             icon:'⚓', types:['destroyer','transport','battleship','carrier','submarine'] }
+};
+function effectiveBuildCost(tile, type){
+  const base = UNIT_STATS[type].cost;
+  if(isEnhanced() && tile.specialization && CITY_SPECIALIZATIONS[tile.specialization].types.includes(type)){
+    return Math.max(1, Math.round(base * 0.8));
+  }
+  return base;
+}
+
 const CITY_PRODUCTION = 3;
 const CAPITAL_PRODUCTION = 5;
 
@@ -157,6 +173,7 @@ let rangeRadiusTiles = []; // alle Felder innerhalb der Fernkampf-Reichweite, un
 let unloadTiles = [];
 let unloadingCargoUnit = null;
 let gameOver = false;
+let coalitionAgainst = null; // Enhanced: owner-id, gegen den sich alle anderen verbünden
 let selectedBuildCity = null;
 let awaitingWaypointClick = false;
 let awaitingPatrolStep = 0; // 0=inaktiv, 1=wartet auf Punkt A, 2=wartet auf Punkt B
@@ -1131,6 +1148,26 @@ function applyPendingCaptureMorph(unit){
   spawnUnit(owner, type, x, y);
 }
 
+// Enhanced: Verbrannte Erde — der Eigentümer selbst zerstört seine Stadt, bevor der Gegner
+// sie einnehmen kann. Die Ruine ist danach niemandes Stadt mehr (keine Produktion, keine
+// Eroberung per Kampf, siehe tryCaptureStructure/attackableTiles) und kann nur von einem
+// Ingenieur wiederaufgebaut werden (siehe completeConstructionStep 'rebuild').
+function destroyCity(unit){
+  const tile = map[unit.y][unit.x];
+  if(tile.type!==T_CITY || tile.ruined || tile.owner!==unit.owner) return;
+  tile.owner = null;
+  tile.ruined = true;
+  tile.buildPoints = 0;
+  tile.buildType = 'infantry';
+  tile.rallyPoint = null;
+  tile.specialization = null;
+  tile.pendingSpecialization = null;
+  tile.specializationTimer = 0;
+  updateInfoPanel('Stadt niedergebrannt — nur ein Ingenieur kann sie wiederaufbauen.');
+  unit.moved = true; unit.movesLeft = 0; unit.actedAtAll = true;
+  finishUnitTurn(unit);
+}
+
 // Unbesetzte Städte verteidigen sich wie eine Infanterie-Einheit ("natürliche Verteidigung").
 // Gibt zurück, ob der Angreifer den Kampf überlebt hat.
 function resolveCityDefenseCombat(attacker){
@@ -1160,7 +1197,10 @@ function tryCaptureStructure(unit, x, y, deferMorph){
     tile.owner = unit.owner;
     return true;
   }
-  if(tile.type===T_CITY && tile.owner!==unit.owner){
+  // Verbrannte Erde (Enhanced): eine zerstörte Stadt ist nur noch Trümmerfeld — keine
+  // Verteidigung, keine Eroberung per Kampf. Nur ein Ingenieur kann sie wiederaufbauen
+  // (siehe completeConstructionStep 'rebuild').
+  if(tile.type===T_CITY && !tile.ruined && tile.owner!==unit.owner){
     const survived = resolveCityDefenseCombat(unit);
     MusicEngine.start();
     if(survived) captureCity(x, y, unit.owner, unit, deferMorph);
@@ -1204,7 +1244,7 @@ function pickDefenderAt(x,y, attacker){
     if(u.x===x && u.y===y && u.hp>0 && !u.hostId) occupantsByLevel[getLevel(u)].push(u);
   }
   const eligible = (list) => list
-    .filter(o => o.owner!==attacker.owner && canAttackTargetType(attacker.type, o))
+    .filter(o => o.owner!==attacker.owner && !areAllied(attacker.owner, o.owner) && canAttackTargetType(attacker.type, o))
     .sort((a,b) => a.id-b.id); // Stapel (z.B. in Städten) wird stabil von der ältesten Einheit an abgearbeitet
 
   if(allowedLevels.includes('air')){
@@ -1400,7 +1440,10 @@ function selectUnit(u){
         }
         const tile = map[t.y][t.x];
         const occ = unitsAt(t.x,t.y);
-        if(occ.length===0 && (tile.type===T_CITY || tile.type===T_AIRPORT || tile.type===T_RADAR) && tile.owner!==u.owner && stats.subclass==='land'){
+        // Verbrannte/zerstörte Städte (Enhanced) sind reine Trümmerfelder ohne Verteidigung
+        // — kein Angriffsziel, einfach begehbares Gelände (nur ein Ingenieur kann sie
+        // wiederaufbauen).
+        if(occ.length===0 && ((tile.type===T_CITY && !tile.ruined) || tile.type===T_AIRPORT || tile.type===T_RADAR) && tile.owner!==u.owner && stats.subclass==='land'){
           attackableTiles.push(t);
           seenAttack.add(tk);
         }
@@ -1617,6 +1660,13 @@ function renderUnitActions(){
       if(!cu) continue;
       const cuName = UNIT_STATS[cu.type].name;
       addBtn(`📦 ${cuName.slice(0,3)}`, () => startUnload(u, cu), false, `Entladen: ${cuName}`);
+    }
+  }
+
+  if(isEnhanced() && s.subclass==='land'){
+    const homeTile = map[u.y][u.x];
+    if(homeTile.type===T_CITY && !homeTile.ruined && homeTile.owner===u.owner){
+      addBtn('🔥', () => destroyCity(u), false, 'Verbrannte Erde: Stadt niederbrennen (nur ein Ingenieur kann sie wiederaufbauen)');
     }
   }
 
@@ -1989,7 +2039,7 @@ function handleGameClick(sx, sy){
           // tatsächlich betreten, auch wenn sie den Kampf gewinnen — Angriff ja, Einzug nein.
           canEnter = res.entered && terrainAllowed(destTile, selectedUnit);
           if(canEnter){
-            if((destTile.type===T_CITY || destTile.type===T_AIRPORT || destTile.type===T_RADAR) && destTile.owner!==selectedUnit.owner && stats.subclass==='land'){
+            if(((destTile.type===T_CITY && !destTile.ruined) || destTile.type===T_AIRPORT || destTile.type===T_RADAR) && destTile.owner!==selectedUnit.owner && stats.subclass==='land'){
               if(destTile.type===T_CITY) captureCity(x,y, selectedUnit.owner, selectedUnit, true);
               else destTile.owner = selectedUnit.owner;
             }
@@ -2081,7 +2131,7 @@ function handleGameClick(sx, sy){
         updateInfoPanel(`${stats.name} an Bord von ${UNIT_STATS[hostAtDest.type].name} geladen.`);
       } else {
         const destTile = map[y][x];
-        if((destTile.type===T_CITY || destTile.type===T_AIRPORT) && destTile.owner!==selectedUnit.owner && stats.subclass==='land' && destTile.type===T_CITY){
+        if(destTile.type===T_CITY && !destTile.ruined && destTile.owner!==selectedUnit.owner && stats.subclass==='land'){
           // Auch beim Reinlaufen in eine unbesetzte Stadt kämpft die Einheit gegen deren
           // Grundverteidigung — das soll genauso wie ein echter Kampf sichtbar sein. Die
           // Einheit betritt die Stadt daher (wie bei echtem Kampf) erst NACH dem Ausgang,
@@ -2096,7 +2146,8 @@ function handleGameClick(sx, sy){
           deferMoveAnim = true;
         } else {
           selectedUnit.x = x; selectedUnit.y = y;
-          if((destTile.type===T_CITY || destTile.type===T_AIRPORT || destTile.type===T_RADAR) && destTile.owner!==selectedUnit.owner){
+          const isUnclaimedStructure = ((destTile.type===T_CITY && !destTile.ruined) || destTile.type===T_AIRPORT || destTile.type===T_RADAR) && destTile.owner!==selectedUnit.owner;
+          if(isUnclaimedStructure){
             if(stats.subclass==='land'){
               tryCaptureStructure(selectedUnit, x, y);
               updateInfoPanel(destTile.type===T_RADAR ? 'Radarstation erobert!' : 'Flughafen erobert!');
@@ -2197,33 +2248,44 @@ function renderBuildPanel(){
   document.getElementById('build-city-title').textContent = (tile.capital ? 'Hauptstadt' : 'Stadt') + (coastal ? ' ⚓' : '');
 
   const rate = tile.capital ? CAPITAL_PRODUCTION : CITY_PRODUCTION;
-  const cost = UNIT_STATS[tile.buildType].cost;
-  const pct = Math.min(100, Math.floor(100 * tile.buildPoints / cost));
-  document.getElementById('build-progress-label').textContent =
-    `Baut: ${UNIT_STATS[tile.buildType].name} — ${tile.buildPoints}/${cost} (+${rate}/Runde)`;
-  document.getElementById('build-progress-bar').style.width = pct + '%';
+  const converting = isEnhanced() && tile.specializationTimer > 0;
+  if(converting){
+    document.getElementById('build-progress-label').textContent =
+      `Umbau zu ${CITY_SPECIALIZATIONS[tile.pendingSpecialization].name}: noch ${tile.specializationTimer} Runde(n) — keine Produktion`;
+    document.getElementById('build-progress-bar').style.width = '0%';
+  } else {
+    const cost = effectiveBuildCost(tile, tile.buildType);
+    const pct = Math.min(100, Math.floor(100 * tile.buildPoints / cost));
+    document.getElementById('build-progress-label').textContent =
+      `Baut: ${UNIT_STATS[tile.buildType].name} — ${tile.buildPoints}/${cost} (+${rate}/Runde)`;
+    document.getElementById('build-progress-bar').style.width = pct + '%';
+  }
 
   document.getElementById('build-rally-label').textContent = tile.rallyPoint
     ? `Sammelpunkt: (${tile.rallyPoint.x}, ${tile.rallyPoint.y})`
     : 'Kein Sammelpunkt';
   document.getElementById('build-rally-clear-btn').classList.toggle('hidden', !tile.rallyPoint);
 
+  renderSpecializationRow(tile, coastal, converting);
+
   const optionsDiv = document.getElementById('build-options');
   optionsDiv.innerHTML = '';
   for(const type of buildOrderFor()){
     const stats = UNIT_STATS[type];
-    const disabled = stats.subclass==='sea' && !coastal;
+    const disabled = (stats.subclass==='sea' && !coastal) || converting;
     const btn = document.createElement('button');
     btn.className = 'build-option' + (tile.buildType===type ? ' active' : '') + (disabled ? ' disabled' : '');
     const fuelStr = stats.fuel !== undefined ? `, Sprit ${stats.fuel}` : '';
     const rangeStr = stats.range>0 ? `, Reich ${stats.range}` : '';
     const portStr = stats.portageCapacity ? `, Fracht ${stats.portageCapacity}` : '';
+    const effCost = effectiveBuildCost(tile, type);
+    const costStr = effCost < stats.cost ? `<s>${stats.cost}</s> ${effCost}⚙` : `${stats.cost}⚙`;
     btn.innerHTML = `<span class="bo-name">${stats.label} ${stats.name}</span>` +
-      `<span class="bo-stats">${disabled ? 'Nur in Küstenstädten (angrenzendes Wasser)' : `Bew ${stats.move} / Dmg ${stats.dmg} / Ang% ${stats.power} / Vert% ${stats.defense} / HP ${stats.hp}${rangeStr}${fuelStr}${portStr}`}</span>` +
-      `<span class="bo-cost">${stats.cost}⚙</span>`;
+      `<span class="bo-stats">${(stats.subclass==='sea' && !coastal) ? 'Nur in Küstenstädten (angrenzendes Wasser)' : `Bew ${stats.move} / Dmg ${stats.dmg} / Ang% ${stats.power} / Vert% ${stats.defense} / HP ${stats.hp}${rangeStr}${fuelStr}${portStr}`}</span>` +
+      `<span class="bo-cost">${costStr}</span>`;
     if(disabled){
       btn.disabled = true;
-      btn.title = 'Nur in Küstenstädten verfügbar (angrenzendes Wasser nötig)';
+      btn.title = converting ? 'Während des Stadtumbaus keine Produktion möglich' : 'Nur in Küstenstädten verfügbar (angrenzendes Wasser nötig)';
     } else {
       btn.addEventListener('click', () => {
         tile.buildType = type;
@@ -2231,6 +2293,52 @@ function renderBuildPanel(){
       });
     }
     optionsDiv.appendChild(btn);
+  }
+}
+
+// Enhanced: Spezialisierungs-Auswahl/-Fortschritt im Baumenü — eigener Abschnitt, damit
+// renderBuildPanel() nicht zu unübersichtlich wird.
+function renderSpecializationRow(tile, coastal, converting){
+  const row = document.getElementById('build-specialization-row');
+  if(!isEnhanced()){ row.classList.add('hidden'); return; }
+  row.classList.remove('hidden');
+  row.innerHTML = '';
+  if(converting){
+    const label = document.createElement('span');
+    label.className = 'build-spec-label';
+    label.textContent = `🏗️ Umbau zu ${CITY_SPECIALIZATIONS[tile.pendingSpecialization].icon} ${CITY_SPECIALIZATIONS[tile.pendingSpecialization].name} — noch ${tile.specializationTimer} Runde(n)`;
+    row.appendChild(label);
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'build-spec-btn';
+    cancelBtn.textContent = '✕ Abbrechen';
+    cancelBtn.addEventListener('click', () => {
+      tile.pendingSpecialization = null;
+      tile.specializationTimer = 0;
+      renderBuildPanel();
+    });
+    row.appendChild(cancelBtn);
+    return;
+  }
+  const label = document.createElement('span');
+  label.className = 'build-spec-label';
+  label.textContent = tile.specialization
+    ? `${CITY_SPECIALIZATIONS[tile.specialization].icon} ${CITY_SPECIALIZATIONS[tile.specialization].name}`
+    : 'Keine Spezialisierung';
+  row.appendChild(label);
+  for(const key of Object.keys(CITY_SPECIALIZATIONS)){
+    if(key===tile.specialization) continue;
+    if(key==='harbor' && !coastal) continue;
+    const spec = CITY_SPECIALIZATIONS[key];
+    const btn = document.createElement('button');
+    btn.className = 'build-spec-btn';
+    btn.textContent = `${spec.icon} ${spec.name}`;
+    btn.title = `${spec.types.map(t=>UNIT_STATS[t].name).join('/')} 20% schneller/günstiger — Umbauzeit ${tile.specialization ? 15 : 10} Runden`;
+    btn.addEventListener('click', () => {
+      tile.pendingSpecialization = key;
+      tile.specializationTimer = tile.specialization ? 15 : 10;
+      renderBuildPanel();
+    });
+    row.appendChild(btn);
   }
 }
 
@@ -2279,11 +2387,37 @@ function pickAiBuildType(coastal){
   return 'infantry';
 }
 
+// Enhanced: KI wählt gelegentlich für eine ihrer unspezialisierten Städte eine
+// Spezialisierung (passend zu Küstenlage), damit die KI die Mechanik auch wirklich nutzt.
+// Bewusst simpel gehalten (kleine Zufallschance pro Stadt und Runde) statt eine explizite
+// "Stadt X Runden im Besitz"-Verfolgung einzuführen.
+function aiConsiderCitySpecialization(owner){
+  for(const c of citiesOf(owner)){
+    const tile = map[c.y][c.x];
+    if(tile.ruined || tile.specialization || tile.specializationTimer>0) continue;
+    if(Math.random() > 0.06) continue;
+    const coastal = isCoastal(c.x,c.y);
+    const choices = coastal ? ['arms','airbase','harbor'] : ['arms','airbase'];
+    tile.pendingSpecialization = choices[Math.floor(Math.random()*choices.length)];
+    tile.specializationTimer = 10;
+  }
+}
+
 function processCityProduction(owner){
   for(let y=0;y<ROWS;y++){
     for(let x=0;x<COLS;x++){
       const tile = map[y][x];
       if(tile.type===T_CITY && tile.owner===owner){
+        // Stadt-Umbau (Enhanced): läuft ein Spezialisierungswechsel, ruht die Produktion
+        // komplett, bis er fertig ist.
+        if(isEnhanced() && tile.specializationTimer > 0){
+          tile.specializationTimer--;
+          if(tile.specializationTimer <= 0){
+            tile.specialization = tile.pendingSpecialization;
+            tile.pendingSpecialization = null;
+          }
+          continue;
+        }
         const rate = tile.capital ? CAPITAL_PRODUCTION : CITY_PRODUCTION;
         tile.buildPoints += rate;
         let type = tile.buildType || 'infantry';
@@ -2291,7 +2425,7 @@ function processCityProduction(owner){
           type = 'infantry';
           tile.buildType = 'infantry';
         }
-        const cost = UNIT_STATS[type].cost;
+        const cost = effectiveBuildCost(tile, type);
         if(tile.buildPoints >= cost){
           // Städte fassen beliebig viele Einheiten — neue Einheiten spawnen direkt dort.
           const spawned = spawnUnit(owner, type, x, y);
@@ -2453,6 +2587,7 @@ function advanceTurn(){
   turnIndex++;
   if(turnIndex >= turnOrder.length){ turnIndex = 0; turnNumber++; }
   currentTurnOwner = turnOrder[turnIndex];
+  updateCoalitionState();
 
   if(currentTurnOwner === OWNER_PLAYER){
     processOrderStates(OWNER_PLAYER);
@@ -2472,15 +2607,40 @@ function advanceTurn(){
   setTimeout(() => runAiOwnerTurn(currentTurnOwner), 350);
 }
 
+function totalCapturableCities(){
+  let n = 0;
+  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++) if(map[y][x].type===T_CITY && !map[y][x].ruined) n++;
+  return n;
+}
+
+// Enhanced: 70%-Dominanz-Regel — kontrolliert eine Partei 70% oder mehr aller (nicht
+// zerstörten) Städte, verbünden sich automatisch alle anderen aktiven Parteien gegen sie.
+// Dynamisch: wird bei jedem Rundenwechsel neu bewertet und löst sich auf, sobald der
+// Anteil (z.B. durch Rückeroberung) wieder unter 70% fällt.
+function updateCoalitionState(){
+  if(!isEnhanced()){ coalitionAgainst = null; return; }
+  const total = totalCapturableCities();
+  if(total===0){ coalitionAgainst = null; return; }
+  coalitionAgainst = activeOwners().find(o => citiesOf(o).length / total >= 0.70) || null;
+}
+
+// Neutrale Städte haben keine eigene Partei und stehen daher nie im Bündnis.
+function areAllied(a, b){
+  if(!coalitionAgainst) return false;
+  if(a===OWNER_NEUTRAL || b===OWNER_NEUTRAL) return false;
+  if(a===coalitionAgainst || b===coalitionAgainst) return false;
+  return a!==b;
+}
+
 /* ---------- KI ---------- */
 function hostileTargetsFor(owner){
   const targets = [];
   for(const o of activeOwners()){
-    if(o===owner) continue;
+    if(o===owner || areAllied(owner,o)) continue;
     citiesOf(o).forEach(c=>targets.push({x:c.x,y:c.y}));
   }
   citiesOf(OWNER_NEUTRAL).forEach(c=>targets.push({x:c.x,y:c.y}));
-  units.filter(u=>u.owner!==owner && u.owner!==OWNER_NEUTRAL && u.hp>0 && !u.hostId)
+  units.filter(u=>u.owner!==owner && u.owner!==OWNER_NEUTRAL && !areAllied(owner,u.owner) && u.hp>0 && !u.hostId)
     .forEach(u=>targets.push({x:u.x,y:u.y}));
   return targets;
 }
@@ -2503,7 +2663,10 @@ function runAiOwnerTurn(owner){
 
   for(const u of unitsOf(owner)) advanceWaypoint(u);
   for(const u of unitsOf(owner)) advancePatrol(u);
-  if(isEnhanced()) for(const u of unitsOf(owner)) advanceConstruction(u);
+  if(isEnhanced()){
+    for(const u of unitsOf(owner)) advanceConstruction(u);
+    aiConsiderCitySpecialization(owner);
+  }
   processCityProduction(owner);
   processFuel(owner);
   processDefensiveFire(owner);
@@ -2566,7 +2729,7 @@ function aiActUnit(unit){
       if(res.winner==='attacker' && res.entered && terrainAllowed(map[a.y][a.x], unit)){
         unit.x=a.x; unit.y=a.y;
         const t=map[a.y][a.x];
-        if((t.type===T_CITY || t.type===T_AIRPORT || t.type===T_RADAR) && t.owner!==unit.owner && stats.subclass==='land'){
+        if(((t.type===T_CITY && !t.ruined) || t.type===T_AIRPORT || t.type===T_RADAR) && t.owner!==unit.owner && stats.subclass==='land'){
           if(t.type===T_CITY) captureCity(a.x,a.y,unit.owner,unit); else t.owner = unit.owner;
         }
       }
@@ -2597,7 +2760,7 @@ function aiActUnit(unit){
         if(res.winner==='attacker' && res.entered && terrainAllowed(map[step.y][step.x], unit)){
           unit.x=step.x; unit.y=step.y;
           const t=map[step.y][step.x];
-          if((t.type===T_CITY || t.type===T_AIRPORT || t.type===T_RADAR) && t.owner!==unit.owner && stats.subclass==='land'){
+          if(((t.type===T_CITY && !t.ruined) || t.type===T_AIRPORT || t.type===T_RADAR) && t.owner!==unit.owner && stats.subclass==='land'){
             if(t.type===T_CITY) captureCity(step.x, step.y, unit.owner, unit); else t.owner = unit.owner;
           }
         }
@@ -2869,9 +3032,15 @@ function updateHud(){
     `Runde ${turnNumber} — ${currentTurnOwner===OWNER_PLAYER ? 'Dein Zug' : ownerLabel(currentTurnOwner)+' zieht...'}`;
   const ownerPanel = document.getElementById('owner-panel');
   ownerPanel.innerHTML = '';
+  if(coalitionAgainst){
+    const banner = document.createElement('div');
+    banner.className = 'coalition-banner';
+    banner.textContent = `⚔ Bündnis gegen ${coalitionAgainst===OWNER_PLAYER ? 'dich' : ownerLabel(coalitionAgainst)}`;
+    ownerPanel.appendChild(banner);
+  }
   for(const o of activeOwners()){
     const row = document.createElement('div');
-    row.className = 'owner-row' + (isEliminated(o) ? ' owner-dead' : '');
+    row.className = 'owner-row' + (isEliminated(o) ? ' owner-dead' : '') + (o===coalitionAgainst ? ' owner-dominant' : '');
     row.innerHTML = `<span class="owner-name" style="color:${OWNER_COLORS[o]}">${ownerLabel(o)}</span>` +
       `<span class="owner-stat">🏙${citiesOf(o).length}</span>` +
       `<span class="owner-stat">⚔${allUnitsOf(o).length}</span>`;
@@ -3005,7 +3174,18 @@ function render(){
         gctx.beginPath(); gctx.arc(px+tsz*0.68, py+tsz*0.62, tsz*0.18, Math.PI, 0); gctx.fill();
       }
 
-      if(tile.type===T_CITY){
+      if(tile.type===T_CITY && tile.ruined){
+        // Verbrannte Erde (Enhanced): schwarz-graue Trümmer statt Besitzerfarbe — signalisiert
+        // klar "niemandes Stadt mehr", nur ein Ingenieur kann sie wiederaufbauen.
+        gctx.fillStyle = '#2a241f';
+        const pad = tsz*0.2;
+        gctx.fillRect(px+pad, py+pad*0.6, tsz-2*pad, tsz-2*pad*0.6);
+        gctx.fillStyle = '#8a6a4a';
+        gctx.font = `${Math.floor(tsz*0.4)}px monospace`;
+        gctx.textAlign = 'center';
+        gctx.textBaseline = 'middle';
+        gctx.fillText('▲', px+tsz/2, py+tsz/2+2);
+      } else if(tile.type===T_CITY){
         const color = OWNER_COLORS[tile.owner] || OWNER_COLORS[OWNER_NEUTRAL];
         gctx.fillStyle = color;
         const pad = tsz*0.2;

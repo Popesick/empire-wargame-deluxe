@@ -329,6 +329,21 @@ html,body{
   text-decoration:line-through;
 }
 
+.owner-row.owner-dominant{
+  outline:1px solid #e0473f;
+  background:rgba(224,71,63,0.12);
+}
+
+.coalition-banner{
+  font-size:15px;
+  color:#e0473f;
+  font-weight:bold;
+  white-space:nowrap;
+  border-bottom:1px solid var(--panel-border);
+  padding-bottom:4px;
+  margin-bottom:2px;
+}
+
 .owner-name{
   font-weight:bold;
   min-width:2.6em;
@@ -471,6 +486,36 @@ html,body{
 }
 
 #build-rally-row button:hover{
+  border-color:var(--gold);
+}
+
+#build-specialization-row{
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:8px;
+  margin:10px 12px 0 12px;
+  padding-bottom:10px;
+  border-bottom:1px solid var(--panel-border);
+  font-size:15px;
+}
+
+.build-spec-label{
+  color:#8a93a8;
+  margin-right:auto;
+}
+
+.build-spec-btn{
+  font-family:'VT323', monospace;
+  font-size:15px;
+  padding:4px 10px;
+  background:#1c2740;
+  border:1px solid var(--panel-border);
+  color:var(--text);
+  cursor:pointer;
+}
+
+.build-spec-btn:hover{
   border-color:var(--gold);
 }
 
