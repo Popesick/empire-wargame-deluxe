@@ -33,7 +33,7 @@ html,body{
   flex-direction:column;
   align-items:center;
   justify-content:flex-end;
-  background:#0a0e14 url('images/title-bg.webp') center center / cover no-repeat;
+  background:#0a0e14 url('images/title-bg.webp') center center / contain no-repeat;
   text-align:center;
 }
 
