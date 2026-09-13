@@ -3427,6 +3427,50 @@ function render(){
 }
 
 // Zeichnet eine an den Einheitentyp angelehnte Silhouette statt eines reinen Kreises.
+/* ---------- EINHEITEN-GRAFIKEN (optional, mit Fallback auf Vektor-Icons) ---------- */
+// Pro Einheitentyp einfach einen Dateipfad eintragen, sobald eine Grafik vorliegt — fehlt
+// ein Eintrag oder ist das Bild noch nicht geladen, zeichnet drawUnit() unverändert den
+// bisherigen Vektor-Umriss (drawUnitShape). Die Quellgrafik sollte neutral/grau sein
+// (siehe Bild-Prompts): sie wird beim ersten Bedarf pro (Typ, Besitzer)-Kombination EINMAL
+// in die Parteifarbe eingefärbt und als Offscreen-Canvas gecacht — pro Frame kostet das
+// danach nur noch ein normales drawImage(), nicht teurer als die alten Vektor-Pfade.
+const UNIT_SPRITE_FILES = {
+  infantry: 'images/units/infantry.webp'
+};
+const unitSpriteImages = {};
+for(const type in UNIT_SPRITE_FILES){
+  const img = new Image();
+  img.src = UNIT_SPRITE_FILES[type];
+  unitSpriteImages[type] = img;
+}
+function spriteReady(type){
+  const img = unitSpriteImages[type];
+  return !!img && img.complete && img.naturalWidth > 0;
+}
+
+const tintedSpriteCache = {};
+// Nutzt den 'color'-Mischmodus (Hue+Sättigung der Füllfarbe, Helligkeit/Schattierung des
+// Originals bleibt erhalten) — genau das richtige Werkzeug, um ein neutral-graues Modell
+// einzufärben, ohne die eingemodellierten Lichter/Schatten zu verlieren.
+function getTintedSprite(type, owner){
+  const cacheKey = type + '_' + owner;
+  let canvas = tintedSpriteCache[cacheKey];
+  if(canvas) return canvas;
+  const img = unitSpriteImages[type];
+  const w = img.naturalWidth, h = img.naturalHeight;
+  canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const c = canvas.getContext('2d');
+  c.drawImage(img, 0, 0);
+  c.globalCompositeOperation = 'color';
+  c.fillStyle = OWNER_COLORS[owner] || OWNER_COLORS[OWNER_NEUTRAL];
+  c.fillRect(0, 0, w, h);
+  c.globalCompositeOperation = 'destination-in';
+  c.drawImage(img, 0, 0);
+  tintedSpriteCache[cacheKey] = canvas;
+  return canvas;
+}
+
 function drawUnitShape(type, isAir){
   gctx.beginPath();
   switch(type){
@@ -3486,21 +3530,30 @@ function drawGhostUnit(snap, tsz){
   const cx = px+tsz/2, cy = py+tsz/2;
   gctx.save();
   gctx.globalAlpha = 0.85;
-  gctx.save();
-  gctx.translate(cx, cy);
-  gctx.scale(tsz, tsz);
-  drawUnitShape(snap.type, s.category==='air');
-  gctx.restore();
-  gctx.fillStyle = OWNER_COLORS[snap.owner];
-  gctx.fill();
-  gctx.lineWidth = 1.5;
-  gctx.strokeStyle = '#000';
-  gctx.stroke();
-  gctx.fillStyle = '#0a0e14';
-  gctx.font = `bold ${Math.floor(tsz*0.28)}px monospace`;
-  gctx.textAlign = 'center';
-  gctx.textBaseline = 'middle';
-  gctx.fillText(s.label, cx, cy+1);
+  if(spriteReady(snap.type)){
+    const sprite = getTintedSprite(snap.type, snap.owner);
+    gctx.save();
+    gctx.translate(cx, cy);
+    if(snap.owner !== OWNER_PLAYER) gctx.scale(-1, 1);
+    gctx.drawImage(sprite, -tsz/2, -tsz/2, tsz, tsz);
+    gctx.restore();
+  } else {
+    gctx.save();
+    gctx.translate(cx, cy);
+    gctx.scale(tsz, tsz);
+    drawUnitShape(snap.type, s.category==='air');
+    gctx.restore();
+    gctx.fillStyle = OWNER_COLORS[snap.owner];
+    gctx.fill();
+    gctx.lineWidth = 1.5;
+    gctx.strokeStyle = '#000';
+    gctx.stroke();
+    gctx.fillStyle = '#0a0e14';
+    gctx.font = `bold ${Math.floor(tsz*0.28)}px monospace`;
+    gctx.textAlign = 'center';
+    gctx.textBaseline = 'middle';
+    gctx.fillText(s.label, cx, cy+1);
+  }
   gctx.restore();
 }
 
@@ -3525,27 +3578,50 @@ function drawUnit(u, tsz){
   const isDeep = u.subLevel==='deep';
   const cx = px+tsz/2, cy = py+tsz/2;
 
+  const useSprite = spriteReady(u.type);
+  const movedDim = (u.moved || u.orderState || u.destination || u.patrol || u.dugIn) && u.owner===OWNER_PLAYER;
+
   gctx.save();
   if(isDeep) gctx.globalAlpha = 0.55;
 
-  gctx.save();
-  gctx.translate(cx, cy);
-  gctx.scale(tsz, tsz);
-  drawUnitShape(u.type, isAir);
-  gctx.restore();
-  gctx.fillStyle = color;
-  gctx.fill();
-  gctx.lineWidth = isSelected ? 3 : (isCrippled(u) ? 2.5 : 1.5);
-  gctx.strokeStyle = isSelected ? '#e0b84a' : (isCrippled(u) ? '#f5473f' : '#000');
-  if(isDeep) gctx.setLineDash([3,2]);
-  gctx.stroke();
-  gctx.setLineDash([]);
+  if(useSprite){
+    // Grafik-Pfad: eingefärbtes Sprite statt Vektor-Umriss. Alle anderen Gegner (nicht der
+    // Spieler) werden horizontal gespiegelt — kostet keine zweite Grafik, macht "eigene vs.
+    // fremde Einheit" aber auf einen Blick unterscheidbar, zusätzlich zur Farbe.
+    const sprite = getTintedSprite(u.type, u.owner);
+    gctx.save();
+    gctx.translate(cx, cy);
+    if(isSelected){
+      gctx.beginPath();
+      gctx.ellipse(0, tsz*0.36, tsz*0.34, tsz*0.11, 0, 0, Math.PI*2);
+      gctx.strokeStyle = '#e0b84a';
+      gctx.lineWidth = 2.5;
+      gctx.stroke();
+    }
+    if(u.owner !== OWNER_PLAYER) gctx.scale(-1, 1);
+    if(movedDim) gctx.globalAlpha *= 0.5;
+    gctx.drawImage(sprite, -tsz/2, -tsz/2, tsz, tsz);
+    gctx.restore();
+  } else {
+    gctx.save();
+    gctx.translate(cx, cy);
+    gctx.scale(tsz, tsz);
+    drawUnitShape(u.type, isAir);
+    gctx.restore();
+    gctx.fillStyle = color;
+    gctx.fill();
+    gctx.lineWidth = isSelected ? 3 : (isCrippled(u) ? 2.5 : 1.5);
+    gctx.strokeStyle = isSelected ? '#e0b84a' : (isCrippled(u) ? '#f5473f' : '#000');
+    if(isDeep) gctx.setLineDash([3,2]);
+    gctx.stroke();
+    gctx.setLineDash([]);
 
-  gctx.fillStyle = '#0a0e14';
-  gctx.font = `bold ${Math.floor(tsz*0.28)}px monospace`;
-  gctx.textAlign = 'center';
-  gctx.textBaseline = 'middle';
-  gctx.fillText(s.label, cx, cy+1);
+    gctx.fillStyle = '#0a0e14';
+    gctx.font = `bold ${Math.floor(tsz*0.28)}px monospace`;
+    gctx.textAlign = 'center';
+    gctx.textBaseline = 'middle';
+    gctx.fillText(s.label, cx, cy+1);
+  }
 
   const maxHp = effStat(u,'hp');
   const barW = tsz*0.6;
@@ -3594,7 +3670,7 @@ function drawUnit(u, tsz){
     gctx.fillText(`+${u.cargo.length}`, px+tsz*0.86, py+tsz*0.14);
   }
 
-  if((u.moved || u.orderState || u.destination || u.patrol || u.dugIn) && u.owner===OWNER_PLAYER){
+  if(!useSprite && movedDim){
     gctx.fillStyle = 'rgba(0,0,0,0.35)';
     gctx.save();
     gctx.translate(cx, cy);
