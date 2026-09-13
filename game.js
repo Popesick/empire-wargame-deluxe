@@ -175,6 +175,7 @@ let unloadTiles = [];
 let unloadingCargoUnit = null;
 let gameOver = false;
 let coalitionAgainst = null; // Enhanced: owner-id, gegen den sich alle anderen verbünden
+let lastStandActive = false; // Enhanced: ab 80% Städtekontrolle einer Partei aktiv
 let selectedBuildCity = null;
 let awaitingWaypointClick = false;
 let awaitingPatrolStep = 0; // 0=inaktiv, 1=wartet auf Punkt A, 2=wartet auf Punkt B
@@ -2429,6 +2430,13 @@ function processCityProduction(owner){
     for(let x=0;x<COLS;x++){
       const tile = map[y][x];
       if(tile.type===T_CITY && tile.owner===owner){
+        // "Last Stand" (Enhanced, ab 80% Städtekontrolle einer Partei): JEDE Stadt jeder
+        // Partei spawnt zusätzlich zur normalen Produktion eine Infanterie-Einheit pro
+        // Runde — unabhängig von Bauwarteschlange/Umbau, damit sich alle Seiten in der
+        // Endphase noch wehren können.
+        if(isEnhanced() && lastStandActive){
+          spawnUnit(owner, 'infantry', x, y);
+        }
         // Stadt-Umbau (Enhanced): läuft ein Spezialisierungswechsel, ruht die Produktion
         // komplett, bis er fertig ist.
         if(isEnhanced() && tile.specializationTimer > 0){
@@ -2608,7 +2616,7 @@ function advanceTurn(){
   turnIndex++;
   if(turnIndex >= turnOrder.length){ turnIndex = 0; turnNumber++; }
   currentTurnOwner = turnOrder[turnIndex];
-  updateCoalitionState();
+  updateDominanceState();
   refreshRadarPositions();
 
   if(currentTurnOwner === OWNER_PLAYER){
@@ -2650,15 +2658,20 @@ function totalCapturableCities(){
   return countCitiesByOwner().total;
 }
 
-// Enhanced: 70%-Dominanz-Regel — kontrolliert eine Partei 70% oder mehr aller (nicht
-// zerstörten) Städte, verbünden sich automatisch alle anderen aktiven Parteien gegen sie.
-// Dynamisch: wird bei jedem Rundenwechsel neu bewertet und löst sich auf, sobald der
-// Anteil (z.B. durch Rückeroberung) wieder unter 70% fällt.
-function updateCoalitionState(){
-  if(!isEnhanced()){ coalitionAgainst = null; return; }
+// Wertet beide Dominanz-Mechaniken in einem gemeinsamen Kartendurchlauf aus, statt die
+// Städte pro Aufruf zweimal zu zählen:
+// - 70%-Bündnis-Regel: kontrolliert eine Partei 70%+ aller (nicht zerstörten) Städte,
+//   verbünden sich automatisch alle anderen aktiven Parteien gegen sie.
+// - 80%-"Last Stand"-Regel: ab 80% Kontrolle spawnt JEDE Partei zusätzlich zur normalen
+//   Produktion eine Infanterie pro Stadt und Runde (siehe processCityProduction).
+// Beide sind dynamisch: werden bei jedem Rundenwechsel neu bewertet und lösen sich auf,
+// sobald der Anteil (z.B. durch Rückeroberung) wieder darunter fällt.
+function updateDominanceState(){
+  if(!isEnhanced()){ coalitionAgainst = null; lastStandActive = false; return; }
   const { counts, total } = countCitiesByOwner();
-  if(total===0){ coalitionAgainst = null; return; }
+  if(total===0){ coalitionAgainst = null; lastStandActive = false; return; }
   coalitionAgainst = activeOwners().find(o => (counts[o]||0) / total >= 0.70) || null;
+  lastStandActive = activeOwners().some(o => (counts[o]||0) / total >= 0.80);
 }
 
 // Neutrale Städte haben keine eigene Partei und stehen daher nie im Bündnis.
@@ -3056,10 +3069,11 @@ function checkGameOver(){
 
 function endGame(won, text){
   gameOver = true;
-  document.getElementById('go-title').textContent = won ? 'SIEG!' : 'NIEDERLAGE';
-  document.getElementById('go-title').style.color = won ? '#e0b84a' : '#f5473f';
+  const overlay = document.getElementById('game-over');
+  overlay.classList.toggle('outcome-win', won);
+  overlay.classList.toggle('outcome-lose', !won);
   document.getElementById('go-text').textContent = text;
-  document.getElementById('game-over').classList.remove('hidden');
+  overlay.classList.remove('hidden');
 }
 
 /* ---------- HUD ---------- */
@@ -3072,6 +3086,12 @@ function updateHud(){
     const banner = document.createElement('div');
     banner.className = 'coalition-banner';
     banner.textContent = `⚔ Bündnis gegen ${coalitionAgainst===OWNER_PLAYER ? 'dich' : ownerLabel(coalitionAgainst)}`;
+    ownerPanel.appendChild(banner);
+  }
+  if(lastStandActive){
+    const banner = document.createElement('div');
+    banner.className = 'coalition-banner laststand-banner';
+    banner.textContent = '🪖 Last Stand — alle Städte bauen zusätzlich Infanterie';
     ownerPanel.appendChild(banner);
   }
   for(const o of activeOwners()){
@@ -3661,6 +3681,7 @@ function initGame(){
   gameOver = false;
   minimapTerrainCanvas = null;
   coalitionAgainst = null;
+  lastStandActive = false;
   radarPositions = [];
   closeBuildPanel();
   document.getElementById('unit-info-panel').classList.add('hidden');
@@ -3778,7 +3799,7 @@ function loadGameFromSlot(slot){
   fogEnabled = !!data.fogEnabled;
   exploredSet = new Set(data.exploredSet || []);
   visibleSet = new Set();
-  updateCoalitionState();
+  updateDominanceState();
   refreshRadarPositions();
 
   selectedUnit = null;

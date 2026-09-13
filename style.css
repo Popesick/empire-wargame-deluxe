@@ -320,6 +320,10 @@ html,body{
   margin-bottom:2px;
 }
 
+.laststand-banner{
+  color:var(--gold);
+}
+
 .owner-name{
   font-weight:bold;
   min-width:2.6em;
@@ -586,7 +590,7 @@ html,body{
 }
 
 /* ---------- GAME OVER ---------- */
-#game-over, #save-load-panel{
+#save-load-panel{
   position:fixed;
   top:0; left:0; width:100%; height:100%;
   background:rgba(5,7,12,0.88);
@@ -595,6 +599,32 @@ html,body{
   justify-content:center;
   z-index:10;
   overflow-y:auto;
+}
+
+/* Sieg/Niederlage zeigen ein Vollbild-Motiv (Titel/Stimmung schon im Bild eingebrannt,
+   wie beim Titelbildschirm) statt der alten Text-Box — welches Bild hängt von der per JS
+   gesetzten Klasse ab (siehe endGame()). */
+#game-over{
+  position:fixed;
+  top:0; left:0; width:100%; height:100%;
+  background:#0a0e14 center center / contain no-repeat;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:flex-end;
+  z-index:10;
+}
+
+#game-over.outcome-win{ background-image:url('images/victory-bg.webp'); }
+#game-over.outcome-lose{ background-image:url('images/gameover-bg.webp'); }
+
+.go-overlay{
+  position:relative;
+  z-index:1;
+  width:100%;
+  text-align:center;
+  padding:22px 20px 30px 20px;
+  background:linear-gradient(to top, rgba(6,9,15,0.92) 0%, rgba(6,9,15,0.75) 55%, rgba(6,9,15,0) 100%);
 }
 
 #save-load-panel .go-box{
@@ -692,4 +722,11 @@ html,body{
   font-size:24px;
   color:var(--text);
   margin-bottom:26px;
+}
+
+.go-overlay p{
+  font-size:22px;
+  color:var(--text);
+  margin:0 0 16px 0;
+  text-shadow:1px 1px 3px rgba(0,0,0,0.8);
 }
