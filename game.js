@@ -3175,8 +3175,13 @@ function render(){
       gctx.save();
       if(fogEnabled && !visibleSet.has(key(x,y))) gctx.globalAlpha = 0.45;
 
-      gctx.fillStyle = (tile.type===T_CITY || tile.type===T_AIRPORT || tile.type===T_RADAR) ? '#1b2436' : TILE_COLORS[tile.type];
-      gctx.fillRect(px,py,tsz,tsz);
+      const terrainSprite = terrainSpriteReady(tile.type) ? terrainSpriteImages[tile.type] : null;
+      if(terrainSprite){
+        gctx.drawImage(terrainSprite, px, py, tsz, tsz);
+      } else {
+        gctx.fillStyle = (tile.type===T_CITY || tile.type===T_AIRPORT || tile.type===T_RADAR) ? '#1b2436' : TILE_COLORS[tile.type];
+        gctx.fillRect(px,py,tsz,tsz);
+      }
       gctx.strokeStyle = 'rgba(0,0,0,0.25)';
       gctx.strokeRect(px,py,tsz,tsz);
 
@@ -3211,7 +3216,7 @@ function render(){
         gctx.strokeRect(px+fp, py+fp, tsz-2*fp, tsz-2*fp);
       }
 
-      if(tile.type===T_MOUNTAIN){
+      if(!terrainSprite && tile.type===T_MOUNTAIN){
         gctx.fillStyle = '#6b6b76';
         gctx.beginPath();
         gctx.moveTo(px+tsz*0.5, py+tsz*0.18);
@@ -3224,7 +3229,7 @@ function render(){
         gctx.beginPath(); gctx.arc(px+tsz*0.35, py+tsz*0.55, tsz*0.16, 0, Math.PI*2); gctx.fill();
         gctx.beginPath(); gctx.arc(px+tsz*0.62, py+tsz*0.4, tsz*0.16, 0, Math.PI*2); gctx.fill();
         gctx.beginPath(); gctx.arc(px+tsz*0.55, py+tsz*0.68, tsz*0.16, 0, Math.PI*2); gctx.fill();
-      } else if(tile.type===T_HILLS){
+      } else if(!terrainSprite && tile.type===T_HILLS){
         gctx.fillStyle = '#5a5a3e';
         gctx.beginPath(); gctx.arc(px+tsz*0.4, py+tsz*0.62, tsz*0.22, Math.PI, 0); gctx.fill();
         gctx.beginPath(); gctx.arc(px+tsz*0.68, py+tsz*0.62, tsz*0.18, Math.PI, 0); gctx.fill();
@@ -3435,7 +3440,10 @@ function render(){
 // in die Parteifarbe eingefärbt und als Offscreen-Canvas gecacht — pro Frame kostet das
 // danach nur noch ein normales drawImage(), nicht teurer als die alten Vektor-Pfade.
 const UNIT_SPRITE_FILES = {
-  infantry: 'images/units/infantry.webp'
+  infantry: 'images/units/infantry.webp',
+  artillery: 'images/units/artillery.webp',
+  helicopter: 'images/units/helicopter.webp',
+  engineer: 'images/units/engineer.webp'
 };
 const unitSpriteImages = {};
 for(const type in UNIT_SPRITE_FILES){
@@ -3469,6 +3477,25 @@ function getTintedSprite(type, owner){
   c.drawImage(img, 0, 0);
   tintedSpriteCache[cacheKey] = canvas;
   return canvas;
+}
+
+/* ---------- TERRAIN-GRAFIKEN (optional, mit Fallback auf Flächenfarbe) ---------- */
+// Keine Einfärbung nötig (Terrain hat keinen Besitzer) — die Textur wird einfach 1:1 in
+// jede Kachel dieses Typs gezeichnet. Bei "nahtlosen" Texturen fügen sich gleichartige
+// Nachbarkacheln optisch zu einer durchgehenden Fläche zusammen.
+const TERRAIN_SPRITE_FILES = {
+  [T_MOUNTAIN]: 'images/terrain/mountain.webp',
+  [T_HILLS]: 'images/terrain/hills.webp'
+};
+const terrainSpriteImages = {};
+for(const type in TERRAIN_SPRITE_FILES){
+  const img = new Image();
+  img.src = TERRAIN_SPRITE_FILES[type];
+  terrainSpriteImages[type] = img;
+}
+function terrainSpriteReady(type){
+  const img = terrainSpriteImages[type];
+  return !!img && img.complete && img.naturalWidth > 0;
 }
 
 function drawUnitShape(type, isAir){
