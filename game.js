@@ -279,7 +279,7 @@ function ensureAnimLoop(){
     // Kamera-Ausschnitts oder unter Nebel des Krieges (die nie gezeichnet werden) für
     // immer hängen, obwohl ihre Animation längst vorbei ist.
     const now = performance.now();
-    let stillAnimating = false;
+    let stillAnimating = dustParticles.length > 0;
     for(const u of units){
       if(!u._animFrom) continue;
       if(now - u._animStart < u._animDuration) stillAnimating = true;
@@ -298,6 +298,76 @@ function queueMoveAnim(unit, fromX, fromY){
   unit._animStart = performance.now();
   unit._animDuration = animDurationMs();
   ensureAnimLoop();
+  spawnDustTrail(unit, fromX, fromY);
+}
+
+// Ambiente Dauerschleife nur für den Wasser-Schimmer, unabhängig von Einheiten-Animation
+// (die läuft nur bei tatsächlicher Bewegung) — bewusst auf ~6 Bilder/Sekunde gedrosselt
+// statt volle Framerate, und stoppt sich selbst, sobald der Spielbildschirm verlassen wird.
+let shimmerRafRunning = false;
+const SHIMMER_INTERVAL_MS = 160;
+function ensureShimmerLoop(){
+  if(shimmerRafRunning) return;
+  shimmerRafRunning = true;
+  let lastTick = 0;
+  function loop(){
+    if(document.getElementById('game-screen').classList.contains('hidden')){
+      shimmerRafRunning = false;
+      return;
+    }
+    const now = performance.now();
+    if(now - lastTick >= SHIMMER_INTERVAL_MS){
+      lastTick = now;
+      if(!animRafRunning) render(); // Bewegungs-Loop rendert ohnehin schon jeden Frame
+    }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+}
+
+/* ---------- BEWEGUNGS-STAUBWOLKE ---------- */
+// Rein kosmetisch, wie die Bewegungsanimation: ein paar kurzlebige, verblassende Punkte
+// hinter Boden-Einheiten beim Loslaufen. Läuft über denselben ensureAnimLoop() mit, der
+// beim Zeichnen (drawUnit) noch weitere Staub-Punkte entlang des Animationswegs nachlegt
+// und beendet sich automatisch, sobald sowohl Einheiten-Animation als auch Staub fertig sind.
+let dustParticles = [];
+function spawnDustTrail(unit, fromX, fromY){
+  if(!graphicsEnabled()) return;
+  const s = UNIT_STATS[unit.type];
+  if(s.subclass !== 'land') return; // nur Infanterie/Panzer/Artillerie/Ingenieur wirbeln Staub auf
+  spawnDustAt(fromX, fromY);
+}
+function spawnDustAt(tx, ty){
+  const now = performance.now();
+  for(let i=0;i<3;i++){
+    dustParticles.push({
+      x: tx + 0.5 + (Math.random()-0.5)*0.4,
+      y: ty + 0.5 + (Math.random()-0.5)*0.4,
+      start: now,
+      duration: 380 + Math.random()*220,
+      dx: (Math.random()-0.5)*0.5,
+      dy: (Math.random()-0.5)*0.5,
+      size: 0.14 + Math.random()*0.1
+    });
+  }
+}
+function drawDustParticles(now){
+  if(dustParticles.length===0) return;
+  for(const p of dustParticles){
+    const t = (now - p.start) / p.duration;
+    if(t>=1) continue;
+    const wx = (p.x + p.dx*t) * BASE_TILE;
+    const wy = (p.y + p.dy*t) * BASE_TILE;
+    const scr = worldToScreen(wx, wy);
+    const tsz = BASE_TILE * camera.zoom;
+    const alpha = 0.35 * (1-t);
+    const r = tsz * p.size * (0.6 + 0.4*t);
+    gctx.fillStyle = `rgba(196,172,132,${alpha.toFixed(3)})`;
+    gctx.beginPath();
+    gctx.arc(scr.x, scr.y, r, 0, Math.PI*2);
+    gctx.fill();
+  }
+  dustParticles = dustParticles.filter(p => (now - p.start) < p.duration);
 }
 
 /* ---------- KAMPF-DARSTELLUNG (Sound + Blinken), nur bei Spieleraktionen ---------- */
@@ -3175,6 +3245,7 @@ function render(){
   gctx.clearRect(0,0,gameCanvas.width, gameCanvas.height);
   if(fogEnabled) recomputeVisibility();
 
+  const renderNow = performance.now();
   const tsz = BASE_TILE * camera.zoom;
   const startX = Math.max(0, Math.floor(camera.x / BASE_TILE) - 1);
   const startY = Math.max(0, Math.floor(camera.y / BASE_TILE) - 1);
@@ -3210,6 +3281,8 @@ function render(){
       }
       gctx.strokeStyle = 'rgba(0,0,0,0.25)';
       gctx.strokeRect(px,py,tsz,tsz);
+
+      if(tile.type===T_WATER && graphicsEnabled()) drawWaterShimmer(px, py, tsz, x, y, renderNow);
 
       if(tile.road && tile.type!==T_CITY && tile.type!==T_AIRPORT && tile.type!==T_RADAR){
         const roadDirs = connectedDirs(x,y,'road');
@@ -3444,6 +3517,8 @@ function render(){
     gctx.setLineDash([]);
   }
 
+  if(graphicsEnabled()) drawDustParticles(renderNow);
+
   // Städte/Flughäfen können beliebig viele Boden-/See-Einheiten garnisonieren — dort wird
   // nur eine Einheit stellvertretend gezeichnet (die ausgewählte, falls dabei) plus ein
   // kleines Zahlen-Badge mit der Stapelgröße.
@@ -3594,6 +3669,26 @@ function terrainSpriteReady(type){
   if(!graphicsEnabled()) return false;
   const img = terrainSpriteImages[type];
   return !!img && img.complete && img.naturalWidth > 0;
+}
+
+// Wasser-Schimmer: pro Kachel ein einzelner heller Glanzfleck, dessen Position/Phase aus
+// den Kachel-Koordinaten erzeugt wird (nicht zufällig neu pro Frame) — dadurch schimmert
+// jede Wasserkachel für sich stetig vor sich hin, statt bei jedem Aufruf zu "springen".
+// Läuft über ensureShimmerLoop() bewusst nur mit ~6 Bildern/Sekunde, nicht mit voller
+// Framerate — für ein langsames Glitzern reicht das, und es spart auf großen Karten mit
+// viel sichtbarer Wasserfläche spürbar Rechenzeit gegenüber einem 60fps-Loop.
+function drawWaterShimmer(px, py, tsz, x, y, now){
+  const seed = ((x*928371 + y*123457) % 1000) / 1000;
+  const phase = now/1400 + seed*Math.PI*2;
+  const wave = Math.sin(phase);
+  if(wave < 0.55) return; // nur kurz aufblitzen, nicht dauerhaft sichtbar
+  const alpha = (wave-0.55)/0.45 * 0.22;
+  const sx = px + tsz*(0.15 + 0.65*((seed*7)%1));
+  const sy = py + tsz*(0.2 + 0.6*((seed*13)%1));
+  gctx.fillStyle = `rgba(255,255,255,${alpha.toFixed(3)})`;
+  gctx.beginPath();
+  gctx.ellipse(sx, sy, tsz*0.16, tsz*0.045, -0.3, 0, Math.PI*2);
+  gctx.fill();
 }
 
 /* ---------- STADT-GRAFIKEN (optional, mit Fallback auf Farbfläche+Symbol) ---------- */
@@ -4095,6 +4190,7 @@ function loadGameFromSlot(slot){
   document.getElementById('game-screen').classList.remove('hidden');
   document.getElementById('unit-info-panel').classList.add('hidden');
   closeBuildPanel();
+  ensureShimmerLoop();
 
   resizeCanvas();
   camera.zoom = (data.camera && data.camera.zoom) || 1;
