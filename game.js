@@ -3222,6 +3222,7 @@ let exploredSet = new Set();
 function recomputeVisibility(){
   if(!fogEnabled) return;
   visibleSet = new Set();
+  const exploredBefore = exploredSet.size;
   const sources = [];
   for(const u of unitsOf(OWNER_PLAYER)) sources.push({x:u.x, y:u.y, range: UNIT_STATS[u.type].category==='air' ? SIGHT_RANGE.air : SIGHT_RANGE.ground});
   for(const c of citiesOf(OWNER_PLAYER)) sources.push({x:c.x, y:c.y, range: SIGHT_RANGE.ground});
@@ -3238,6 +3239,10 @@ function recomputeVisibility(){
       }
     }
   }
+  // Die Minimap-Terrainkachel ist ein Cache über die ganze Karte (siehe
+  // buildMinimapTerrainCache) — bei neu entdeckten Kacheln muss er einmal neu aufgebaut
+  // werden, damit die Minimap den Nebel des Krieges respektiert statt alles sofort zu zeigen.
+  if(exploredSet.size !== exploredBefore) minimapTerrainCanvas = null;
 }
 
 function render(){
@@ -3992,6 +3997,9 @@ function buildMinimapTerrainCache(){
   tctx2.fillRect(0,0,minimapCanvas.width, minimapCanvas.height);
   for(let y=0;y<ROWS;y++){
     for(let x=0;x<COLS;x++){
+      // Nebel des Krieges: unentdeckte Kacheln bleiben auf der Minimap ebenfalls verborgen,
+      // statt die ganze Karte sofort zu zeigen (exploredSet wächst nur, siehe recomputeVisibility).
+      if(fogEnabled && !exploredSet.has(key(x,y))) continue;
       const t = map[y][x].type;
       if(t===T_MOUNTAIN) tctx2.fillStyle = '#4a4a52';
       else if(t===T_WATER) tctx2.fillStyle = '#163a52';
@@ -4010,6 +4018,7 @@ function renderMinimap(){
 
   for(let y=0;y<ROWS;y++){
     for(let x=0;x<COLS;x++){
+      if(fogEnabled && !exploredSet.has(key(x,y))) continue;
       if(map[y][x].type===T_CITY){
         mctx.fillStyle = OWNER_COLORS[map[y][x].owner] || OWNER_COLORS[OWNER_NEUTRAL];
         mctx.fillRect(x*BASE_TILE*scale, y*BASE_TILE*scale, 4, 4);
