@@ -242,6 +242,21 @@ function centerCameraOn(wx, wy){
 }
 
 function inBounds(x,y){ return x>=0 && x<COLS && y>=0 && y<ROWS; }
+
+// Straßen/Schienen-Autotiling: liefert die Himmelsrichtungen, in denen ein Nachbar
+// mit demselben Feld (road/rail) existiert, damit render() pro Kachel nur Segmente von
+// der Mitte zu den tatsächlich verbundenen Kanten zeichnet — dasselbe Segment-Set ergibt
+// automatisch Geraden (2 gegenüberliegende Richtungen), Kurven (2 benachbarte), Abzweige
+// und Sackgassen, ohne Sonderfälle pro Form.
+const CONNECT_DIRS = [{dx:0,dy:-1},{dx:0,dy:1},{dx:1,dy:0},{dx:-1,dy:0}];
+function connectedDirs(x, y, field){
+  const dirs = [];
+  for(const d of CONNECT_DIRS){
+    const nx = x+d.dx, ny = y+d.dy;
+    if(inBounds(nx,ny) && map[ny][nx][field]) dirs.push(d);
+  }
+  return dirs;
+}
 function activeOwners(){ return [OWNER_PLAYER, ...aiOwners]; }
 
 /* ---------- BEWEGUNGSANIMATION ---------- */
@@ -3186,26 +3201,65 @@ function render(){
       gctx.strokeRect(px,py,tsz,tsz);
 
       if(tile.road && tile.type!==T_CITY && tile.type!==T_AIRPORT && tile.type!==T_RADAR){
+        const roadDirs = connectedDirs(x,y,'road');
+        const rcx = px+tsz/2, rcy = py+tsz/2;
         gctx.strokeStyle = 'rgba(224,184,74,0.55)';
         gctx.lineWidth = Math.max(1, tsz*0.08);
-        gctx.beginPath();
-        gctx.moveTo(px+tsz*0.1, py+tsz*0.5);
-        gctx.lineTo(px+tsz*0.9, py+tsz*0.5);
-        gctx.stroke();
+        if(roadDirs.length===0){
+          gctx.beginPath();
+          gctx.moveTo(px+tsz*0.1, rcy);
+          gctx.lineTo(px+tsz*0.9, rcy);
+          gctx.stroke();
+        } else {
+          for(const d of roadDirs){
+            gctx.beginPath();
+            gctx.moveTo(rcx, rcy);
+            gctx.lineTo(rcx + d.dx*tsz/2, rcy + d.dy*tsz/2);
+            gctx.stroke();
+          }
+        }
       }
       // Enhanced: Eisenbahn — zwei parallele Linien mit Schwellen statt der einfachen
-      // Straßenlinie, damit sie sich klar vom Straßenbau unterscheidet.
+      // Straßenlinie, damit sie sich klar vom Straßenbau unterscheidet. Segmente folgen
+      // wie bei der Straße den tatsächlich verbundenen Nachbarn (siehe connectedDirs).
       if(tile.rail && tile.type!==T_CITY && tile.type!==T_AIRPORT && tile.type!==T_RADAR){
+        const railDirs = connectedDirs(x,y,'rail');
+        const rcx = px+tsz/2, rcy = py+tsz/2;
         gctx.strokeStyle = 'rgba(200,200,210,0.8)';
         gctx.lineWidth = Math.max(1, tsz*0.035);
-        gctx.beginPath();
-        gctx.moveTo(px+tsz*0.08, py+tsz*0.42); gctx.lineTo(px+tsz*0.92, py+tsz*0.42);
-        gctx.moveTo(px+tsz*0.08, py+tsz*0.58); gctx.lineTo(px+tsz*0.92, py+tsz*0.58);
-        gctx.stroke();
-        for(let tck=0.15; tck<1; tck+=0.18){
+        if(railDirs.length===0){
           gctx.beginPath();
-          gctx.moveTo(px+tsz*tck, py+tsz*0.38); gctx.lineTo(px+tsz*tck, py+tsz*0.62);
+          gctx.moveTo(px+tsz*0.08, py+tsz*0.42); gctx.lineTo(px+tsz*0.92, py+tsz*0.42);
+          gctx.moveTo(px+tsz*0.08, py+tsz*0.58); gctx.lineTo(px+tsz*0.92, py+tsz*0.58);
           gctx.stroke();
+          for(let tck=0.15; tck<1; tck+=0.18){
+            gctx.beginPath();
+            gctx.moveTo(px+tsz*tck, py+tsz*0.38); gctx.lineTo(px+tsz*tck, py+tsz*0.62);
+            gctx.stroke();
+          }
+        } else {
+          for(const d of railDirs){
+            const steps = 2;
+            if(d.dx!==0){
+              const y1 = py+tsz*0.42, y2 = py+tsz*0.58;
+              const xEnd = rcx + d.dx*tsz/2;
+              gctx.beginPath(); gctx.moveTo(rcx,y1); gctx.lineTo(xEnd,y1); gctx.stroke();
+              gctx.beginPath(); gctx.moveTo(rcx,y2); gctx.lineTo(xEnd,y2); gctx.stroke();
+              for(let s=1;s<=steps;s++){
+                const tX = rcx + d.dx*(tsz/2)*(s/(steps+1));
+                gctx.beginPath(); gctx.moveTo(tX,y1-tsz*0.04); gctx.lineTo(tX,y2+tsz*0.04); gctx.stroke();
+              }
+            } else {
+              const x1 = px+tsz*0.42, x2 = px+tsz*0.58;
+              const yEnd = rcy + d.dy*tsz/2;
+              gctx.beginPath(); gctx.moveTo(x1,rcy); gctx.lineTo(x1,yEnd); gctx.stroke();
+              gctx.beginPath(); gctx.moveTo(x2,rcy); gctx.lineTo(x2,yEnd); gctx.stroke();
+              for(let s=1;s<=steps;s++){
+                const tY = rcy + d.dy*(tsz/2)*(s/(steps+1));
+                gctx.beginPath(); gctx.moveTo(x1-tsz*0.04,tY); gctx.lineTo(x2+tsz*0.04,tY); gctx.stroke();
+              }
+            }
+          }
         }
       }
       // Enhanced: Festung — Zinnenrahmen an den Ecken, egal welches Terrain darunter liegt.
