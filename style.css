@@ -32,49 +32,33 @@ html,body{
   display:flex;
   flex-direction:column;
   align-items:center;
-  justify-content:center;
-  background:radial-gradient(ellipse at center, #16233d 0%, #0a0e14 75%);
+  justify-content:flex-end;
+  background:#0a0e14 url('images/title-bg.webp') center center / cover no-repeat;
   text-align:center;
 }
 
-#title-canvas{
-  position:absolute;
-  top:0; left:0;
-  width:100%;
-  height:100%;
-  z-index:0;
-}
-
-.title-text{
+/* Abgedunkelter Streifen unten übers Titelbild, damit Buttons/Hinweis lesbar bleiben,
+   ohne das Bild selbst (das Logo/Credits schon eingebrannt hat) abzudecken. */
+.title-overlay{
   position:relative;
   z-index:1;
-  margin-bottom:10px;
-}
-
-.title-text h1{
-  font-family:'Press Start 2P', monospace;
-  font-size:64px;
-  margin:0;
-  color:var(--gold);
-  letter-spacing:6px;
-  text-shadow:0 0 20px rgba(224,184,74,0.6), 4px 4px 0 #5a3c0a;
-}
-
-.title-text h2{
-  font-family:'Press Start 2P', monospace;
-  font-size:20px;
-  margin:14px 0 0 0;
-  color:var(--text);
-  letter-spacing:4px;
-  text-shadow:2px 2px 0 #000;
+  width:100%;
+  padding:22px 20px 30px 20px;
+  background:linear-gradient(to top, rgba(6,9,15,0.92) 0%, rgba(6,9,15,0.75) 55%, rgba(6,9,15,0) 100%);
 }
 
 .menu{
   position:relative;
   z-index:1;
   display:flex;
+  flex-wrap:wrap;
+  justify-content:center;
   gap:16px;
-  margin-top:28px;
+}
+
+@media (max-width:480px){
+  .menu{ gap:10px; }
+  .menu button, #restart-btn{ padding:10px 14px; font-size:12px; }
 }
 
 .menu button, #restart-btn{
@@ -105,16 +89,8 @@ html,body{
   z-index:1;
   font-size:20px;
   color:#aab4c8;
-  margin-top:26px;
+  margin:14px auto 0 auto;
   max-width:600px;
-}
-
-.credit{
-  position:relative;
-  z-index:1;
-  font-size:15px;
-  color:#5a6478;
-  margin-top:8px;
 }
 
 /* ---------- KARTENOPTIONEN ---------- */

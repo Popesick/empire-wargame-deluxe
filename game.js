@@ -3901,39 +3901,6 @@ document.getElementById('save-load-btn').addEventListener('click', openSaveLoadP
 document.getElementById('load-btn-title').addEventListener('click', openSaveLoadPanel);
 document.getElementById('save-load-close-btn').addEventListener('click', closeSaveLoadPanel);
 
-/* ---------- TITELBILDSCHIRM ---------- */
-const titleCanvas = document.getElementById('title-canvas');
-const tctx = titleCanvas.getContext('2d');
-let titleTime = 0;
-
-function drawTitleBackground(){
-  const w = titleCanvas.width, h = titleCanvas.height;
-  tctx.clearRect(0,0,w,h);
-  tctx.fillStyle = '#0a0e14';
-  tctx.fillRect(0,0,w,h);
-  for(let i=0;i<80;i++){
-    const sx = (i*97 + titleTime*2) % w;
-    const sy = (i*53) % h;
-    const tw = 0.5 + 0.5*Math.sin(titleTime*0.05 + i);
-    tctx.fillStyle = `rgba(224,184,74,${0.15+0.25*tw})`;
-    tctx.fillRect(sx, sy, 2, 2);
-  }
-  tctx.fillStyle = '#16233d';
-  for(let i=0;i<6;i++){
-    const bx = 60 + i*140 + Math.sin(titleTime*0.02+i)*4;
-    const by = h - 40;
-    tctx.fillRect(bx, by, 46, 18);
-    tctx.fillRect(bx+10, by-12, 22, 14);
-    tctx.beginPath();
-    tctx.arc(bx+14, by+18, 8, 0, Math.PI*2);
-    tctx.arc(bx+34, by+18, 8, 0, Math.PI*2);
-    tctx.fill();
-  }
-  titleTime++;
-  requestAnimationFrame(drawTitleBackground);
-}
-drawTitleBackground();
-
 /* ---------- BUTTON-HANDLER ---------- */
 function startGame(){
   MusicEngine.start();
