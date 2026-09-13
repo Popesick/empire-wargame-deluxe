@@ -3224,7 +3224,7 @@ function render(){
         gctx.lineTo(px+tsz*0.15, py+tsz*0.82);
         gctx.closePath();
         gctx.fill();
-      } else if(tile.type===T_FOREST){
+      } else if(!terrainSprite && tile.type===T_FOREST){
         gctx.fillStyle = '#3f6b3f';
         gctx.beginPath(); gctx.arc(px+tsz*0.35, py+tsz*0.55, tsz*0.16, 0, Math.PI*2); gctx.fill();
         gctx.beginPath(); gctx.arc(px+tsz*0.62, py+tsz*0.4, tsz*0.16, 0, Math.PI*2); gctx.fill();
@@ -3443,7 +3443,14 @@ const UNIT_SPRITE_FILES = {
   infantry: 'images/units/infantry.webp',
   artillery: 'images/units/artillery.webp',
   helicopter: 'images/units/helicopter.webp',
-  engineer: 'images/units/engineer.webp'
+  engineer: 'images/units/engineer.webp',
+  fighter: 'images/units/fighter.webp',
+  tank: 'images/units/tank.webp',
+  battleship: 'images/units/battleship.webp',
+  carrier: 'images/units/carrier.webp',
+  transport: 'images/units/transport.webp',
+  submarine: 'images/units/submarine.webp',
+  destroyer: 'images/units/destroyer.webp'
 };
 const unitSpriteImages = {};
 for(const type in UNIT_SPRITE_FILES){
@@ -3485,7 +3492,10 @@ function getTintedSprite(type, owner){
 // Nachbarkacheln optisch zu einer durchgehenden Fläche zusammen.
 const TERRAIN_SPRITE_FILES = {
   [T_MOUNTAIN]: 'images/terrain/mountain.webp',
-  [T_HILLS]: 'images/terrain/hills.webp'
+  [T_HILLS]: 'images/terrain/hills.webp',
+  [T_FOREST]: 'images/terrain/forest.webp',
+  [T_WATER]: 'images/terrain/water.webp',
+  [T_PLAIN]: 'images/terrain/plain.webp'
 };
 const terrainSpriteImages = {};
 for(const type in TERRAIN_SPRITE_FILES){
