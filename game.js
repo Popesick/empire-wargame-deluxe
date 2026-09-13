@@ -63,7 +63,12 @@ const SIZE_PRESETS = {
 };
 const CITY_TILES_PER_CITY = { sparse:70, normal:44, dense:28 };
 
-let mapConfig = { mode:'classic', size:'medium', landform:'continent', landAmount:'normal', cities:'normal', aiCount:1, fogOfWar:'off', animEnabled:'on' };
+let mapConfig = { mode:'classic', size:'medium', landform:'continent', landAmount:'normal', cities:'normal', aiCount:1, fogOfWar:'off', animEnabled:'on', graphics:'sprites' };
+// Grafik-Umschalter für Leute, die den schlichten Vektor-Look bevorzugen — die eigentliche
+// Umschaltung passiert dadurch, dass spriteReady()/terrainSpriteReady()/citySpriteReady()
+// hierüber gehen: bei 'vector' melden sie einfach "kein Sprite verfügbar", und die überall
+// schon vorhandene Vektor-Fallback-Zeichnung greift automatisch, ganz ohne render()-Änderung.
+function graphicsEnabled(){ return mapConfig.graphics !== 'vector'; }
 // Enhanced ist rein additiv: alle Classic-Funktionen bleiben unverändert, Enhanced schaltet
 // per isEnhanced()-Abfrage INNERHALB derselben Funktionen zusätzliches Verhalten frei —
 // niemals über eine separate/kopierte Funktion. Dadurch wirken künftige Classic-Änderungen
@@ -3522,6 +3527,7 @@ for(const type in UNIT_SPRITE_FILES){
   unitSpriteImages[type] = img;
 }
 function spriteReady(type){
+  if(!graphicsEnabled()) return false;
   const img = unitSpriteImages[type];
   return !!img && img.complete && img.naturalWidth > 0;
 }
@@ -3567,6 +3573,7 @@ for(const type in TERRAIN_SPRITE_FILES){
   terrainSpriteImages[type] = img;
 }
 function terrainSpriteReady(type){
+  if(!graphicsEnabled()) return false;
   const img = terrainSpriteImages[type];
   return !!img && img.complete && img.naturalWidth > 0;
 }
@@ -3587,6 +3594,7 @@ for(const type in CITY_SPRITE_FILES){
   citySpriteImages[type] = img;
 }
 function citySpriteReady(type){
+  if(!graphicsEnabled()) return false;
   const img = citySpriteImages[type];
   return !!img && img.complete && img.naturalWidth > 0;
 }
@@ -3611,7 +3619,7 @@ function getTintedCitySprite(type, owner){
 }
 const ruinSpriteImage = new Image();
 ruinSpriteImage.src = 'images/city/ruin.webp';
-function ruinSpriteReady(){ return ruinSpriteImage.complete && ruinSpriteImage.naturalWidth > 0; }
+function ruinSpriteReady(){ return graphicsEnabled() && ruinSpriteImage.complete && ruinSpriteImage.naturalWidth > 0; }
 
 function drawUnitShape(type, isAir){
   gctx.beginPath();

@@ -191,7 +191,6 @@ html,body{
 #hud{
   display:flex;
   align-items:center;
-  justify-content:space-between;
   padding:10px 18px;
   background:var(--panel);
   border-bottom:3px solid var(--panel-border);
@@ -206,10 +205,20 @@ html,body{
   color:var(--gold);
 }
 
-#hud-right{
+#hud-controls{
   display:flex;
   gap:10px;
   align-items:center;
+}
+
+/* Immer am rechten Rand fixiert (margin-left:auto), unabhängig davon, ob/welcher der
+   beiden Status-Texte gerade sichtbar ist — verhindert, dass #hud-controls hin- und
+   herspringt, wenn dieser Text seine Breite ändert (siehe updateHud). */
+#hud-status{
+  display:flex;
+  gap:10px;
+  align-items:center;
+  margin-left:auto;
 }
 
 #all-moved-indicator{

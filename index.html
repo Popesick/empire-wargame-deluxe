@@ -37,6 +37,14 @@
   </div>
 
   <div class="setup-group">
+    <span class="setup-label">Grafik</span>
+    <div class="setup-options" data-group="graphics">
+      <button class="setup-opt active" data-value="sprites" title="Detaillierte Grafiken für Einheiten, Gelände und Städte.">Grafisch</button>
+      <button class="setup-opt" data-value="vector" title="Schlichte, klare Symbole ohne Bilder — für maximale Übersicht.">Minimalistisch</button>
+    </div>
+  </div>
+
+  <div class="setup-group">
     <span class="setup-label">Kartengröße</span>
     <div class="setup-options" data-group="size">
       <button class="setup-opt" data-value="small">Klein</button>
@@ -120,7 +128,7 @@
     <div id="hud-left">
       <span id="turn-indicator">Runde 1 — Dein Zug</span>
     </div>
-    <div id="hud-right">
+    <div id="hud-controls">
       <button id="save-load-btn" title="Speichern / Laden">💾</button>
       <button id="info-btn" title="Einheiten-Übersicht">ℹ Einheiten</button>
       <button id="zoom-out-btn" title="Rauszoomen">－</button>
@@ -129,6 +137,8 @@
       <button id="home-btn" title="Zur Hauptstadt">🏠</button>
       <button id="mute-btn-2">🔊</button>
       <button id="end-turn-btn">Zug beenden ⏭</button>
+    </div>
+    <div id="hud-status">
       <span id="units-to-move-counter" class="hidden" title="Einheiten, die noch einen Befehl brauchen"></span>
       <span id="all-moved-indicator" class="hidden">✔ Alle Einheiten bewegt</span>
     </div>
