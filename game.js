@@ -3292,24 +3292,33 @@ function render(){
       if(tile.type===T_CITY && tile.ruined){
         // Verbrannte Erde (Enhanced): schwarz-graue Trümmer statt Besitzerfarbe — signalisiert
         // klar "niemandes Stadt mehr", nur ein Ingenieur kann sie wiederaufbauen.
-        gctx.fillStyle = '#2a241f';
-        const pad = tsz*0.2;
-        gctx.fillRect(px+pad, py+pad*0.6, tsz-2*pad, tsz-2*pad*0.6);
-        gctx.fillStyle = '#8a6a4a';
-        gctx.font = `${Math.floor(tsz*0.4)}px monospace`;
-        gctx.textAlign = 'center';
-        gctx.textBaseline = 'middle';
-        gctx.fillText('▲', px+tsz/2, py+tsz/2+2);
+        if(ruinSpriteReady()){
+          gctx.drawImage(ruinSpriteImage, px, py, tsz, tsz);
+        } else {
+          gctx.fillStyle = '#2a241f';
+          const pad = tsz*0.2;
+          gctx.fillRect(px+pad, py+pad*0.6, tsz-2*pad, tsz-2*pad*0.6);
+          gctx.fillStyle = '#8a6a4a';
+          gctx.font = `${Math.floor(tsz*0.4)}px monospace`;
+          gctx.textAlign = 'center';
+          gctx.textBaseline = 'middle';
+          gctx.fillText('▲', px+tsz/2, py+tsz/2+2);
+        }
       } else if(tile.type===T_CITY){
-        const color = OWNER_COLORS[tile.owner] || OWNER_COLORS[OWNER_NEUTRAL];
-        gctx.fillStyle = color;
-        const pad = tsz*0.2;
-        gctx.fillRect(px+pad, py+pad*0.6, tsz-2*pad, tsz-2*pad*0.6);
-        gctx.fillStyle = '#0a0e14';
-        gctx.font = `${Math.floor(tsz*0.4)}px monospace`;
-        gctx.textAlign = 'center';
-        gctx.textBaseline = 'middle';
-        gctx.fillText(tile.capital ? '★' : '●', px+tsz/2, py+tsz/2+2);
+        const citySpriteType = tile.capital ? 'capital' : 'city';
+        if(citySpriteReady(citySpriteType)){
+          gctx.drawImage(getTintedCitySprite(citySpriteType, tile.owner), px, py, tsz, tsz);
+        } else {
+          const color = OWNER_COLORS[tile.owner] || OWNER_COLORS[OWNER_NEUTRAL];
+          gctx.fillStyle = color;
+          const pad = tsz*0.2;
+          gctx.fillRect(px+pad, py+pad*0.6, tsz-2*pad, tsz-2*pad*0.6);
+          gctx.fillStyle = '#0a0e14';
+          gctx.font = `${Math.floor(tsz*0.4)}px monospace`;
+          gctx.textAlign = 'center';
+          gctx.textBaseline = 'middle';
+          gctx.fillText(tile.capital ? '★' : '●', px+tsz/2, py+tsz/2+2);
+        }
 
         if(tile.owner===OWNER_PLAYER){
           const hs = tsz*0.4;
@@ -3561,6 +3570,48 @@ function terrainSpriteReady(type){
   const img = terrainSpriteImages[type];
   return !!img && img.complete && img.naturalWidth > 0;
 }
+
+/* ---------- STADT-GRAFIKEN (optional, mit Fallback auf Farbfläche+Symbol) ---------- */
+// Städte werden wie Einheiten pro Partei eingefärbt (Besitzerfarbe ist spielrelevant),
+// aber nicht gespiegelt — ein Gebäude hat keine "Blickrichtung", die Us-vs-Them-Unterscheidung
+// kommt hier allein aus der Farbe. Ruinen gehören niemandem und werden daher neutral,
+// ungetintet gezeichnet.
+const CITY_SPRITE_FILES = {
+  city: 'images/city/city.webp',
+  capital: 'images/city/capital.webp'
+};
+const citySpriteImages = {};
+for(const type in CITY_SPRITE_FILES){
+  const img = new Image();
+  img.src = CITY_SPRITE_FILES[type];
+  citySpriteImages[type] = img;
+}
+function citySpriteReady(type){
+  const img = citySpriteImages[type];
+  return !!img && img.complete && img.naturalWidth > 0;
+}
+const tintedCitySpriteCache = {};
+function getTintedCitySprite(type, owner){
+  const cacheKey = type + '_' + owner;
+  let canvas = tintedCitySpriteCache[cacheKey];
+  if(canvas) return canvas;
+  const img = citySpriteImages[type];
+  const w = img.naturalWidth, h = img.naturalHeight;
+  canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const c = canvas.getContext('2d');
+  c.drawImage(img, 0, 0);
+  c.globalCompositeOperation = 'color';
+  c.fillStyle = OWNER_COLORS[owner] || OWNER_COLORS[OWNER_NEUTRAL];
+  c.fillRect(0, 0, w, h);
+  c.globalCompositeOperation = 'destination-in';
+  c.drawImage(img, 0, 0);
+  tintedCitySpriteCache[cacheKey] = canvas;
+  return canvas;
+}
+const ruinSpriteImage = new Image();
+ruinSpriteImage.src = 'images/city/ruin.webp';
+function ruinSpriteReady(){ return ruinSpriteImage.complete && ruinSpriteImage.naturalWidth > 0; }
 
 function drawUnitShape(type, isAir){
   gctx.beginPath();
