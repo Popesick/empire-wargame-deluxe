@@ -3195,11 +3195,17 @@ function render(){
       gctx.save();
       if(fogEnabled && !visibleSet.has(key(x,y))) gctx.globalAlpha = 0.45;
 
-      const terrainSprite = terrainSpriteReady(tile.type) ? terrainSpriteImages[tile.type] : null;
+      const isStructureTile = tile.type===T_CITY || tile.type===T_AIRPORT || tile.type===T_RADAR;
+      const terrainSprite = terrainSpriteReady(tile.type) ? terrainSpriteImages[tile.type]
+        : (isStructureTile && terrainSpriteReady(T_PLAIN)) ? terrainSpriteImages[T_PLAIN] : null;
       if(terrainSprite){
+        // Stadt/Flughafen/Radar-Kacheln merken sich ihr ursprüngliches Terrain nicht — im
+        // Grafikmodus zeigen wir stattdessen eine neutrale Wiese darunter, damit die
+        // Gebäude-Sprites (die echte Transparenz um ihre runde Basis haben) organisch auf
+        // Landschaft wirken statt auf einer dunklen UI-Box zu stehen.
         gctx.drawImage(terrainSprite, px, py, tsz, tsz);
       } else {
-        gctx.fillStyle = (tile.type===T_CITY || tile.type===T_AIRPORT || tile.type===T_RADAR) ? '#1b2436' : TILE_COLORS[tile.type];
+        gctx.fillStyle = isStructureTile ? '#1b2436' : TILE_COLORS[tile.type];
         gctx.fillRect(px,py,tsz,tsz);
       }
       gctx.strokeStyle = 'rgba(0,0,0,0.25)';
@@ -3267,12 +3273,17 @@ function render(){
           }
         }
       }
-      // Enhanced: Festung — Zinnenrahmen an den Ecken, egal welches Terrain darunter liegt.
+      // Enhanced: Festung — wird über dem bestehenden Terrain gezeichnet, ersetzt es nicht
+      // (die Sprite-Variante hat echte Transparenz um ihre runde Basis, genau wie Einheiten).
       if(tile.fortress){
-        gctx.strokeStyle = '#e0b84a';
-        gctx.lineWidth = Math.max(1.5, tsz*0.05);
-        const fp = tsz*0.12;
-        gctx.strokeRect(px+fp, py+fp, tsz-2*fp, tsz-2*fp);
+        if(fortressSpriteReady()){
+          gctx.drawImage(fortressSpriteImage, px, py, tsz, tsz);
+        } else {
+          gctx.strokeStyle = '#e0b84a';
+          gctx.lineWidth = Math.max(1.5, tsz*0.05);
+          const fp = tsz*0.12;
+          gctx.strokeRect(px+fp, py+fp, tsz-2*fp, tsz-2*fp);
+        }
       }
 
       if(!terrainSprite && tile.type===T_MOUNTAIN){
@@ -3310,7 +3321,10 @@ function render(){
           gctx.fillText('▲', px+tsz/2, py+tsz/2+2);
         }
       } else if(tile.type===T_CITY){
-        const citySpriteType = tile.capital ? 'capital' : 'city';
+        // Enhanced: eine spezialisierte Stadt zeigt ihr Fachgebiet (Rüstung/Flugwerft/Hafen)
+        // statt der generischen Stadtgrafik; eine Hauptstadt hat Vorrang, da es dafür kein
+        // eigenes "spezialisierte Hauptstadt"-Motiv gibt.
+        const citySpriteType = tile.capital ? 'capital' : (tile.specialization || 'city');
         if(citySpriteReady(citySpriteType)){
           gctx.drawImage(getTintedCitySprite(citySpriteType, tile.owner), px, py, tsz, tsz);
         } else {
@@ -3345,15 +3359,19 @@ function render(){
         gctx.textBaseline = 'middle';
         gctx.fillText('✈', px+tsz/2, py+tsz/2+1);
       } else if(tile.type===T_RADAR){
-        const color = tile.owner ? (OWNER_COLORS[tile.owner] || OWNER_COLORS[OWNER_NEUTRAL]) : '#5a6478';
-        gctx.strokeStyle = color;
-        gctx.lineWidth = Math.max(2, tsz*0.06);
-        gctx.beginPath();
-        gctx.arc(px+tsz*0.5, py+tsz*0.62, tsz*0.28, Math.PI, 0);
-        gctx.stroke();
-        gctx.beginPath();
-        gctx.moveTo(px+tsz*0.5, py+tsz*0.62); gctx.lineTo(px+tsz*0.72, py+tsz*0.22);
-        gctx.stroke();
+        if(radarSpriteReady()){
+          gctx.drawImage(getTintedRadarSprite(tile.owner), px, py, tsz, tsz);
+        } else {
+          const color = tile.owner ? (OWNER_COLORS[tile.owner] || OWNER_COLORS[OWNER_NEUTRAL]) : '#5a6478';
+          gctx.strokeStyle = color;
+          gctx.lineWidth = Math.max(2, tsz*0.06);
+          gctx.beginPath();
+          gctx.arc(px+tsz*0.5, py+tsz*0.62, tsz*0.28, Math.PI, 0);
+          gctx.stroke();
+          gctx.beginPath();
+          gctx.moveTo(px+tsz*0.5, py+tsz*0.62); gctx.lineTo(px+tsz*0.72, py+tsz*0.22);
+          gctx.stroke();
+        }
       }
       gctx.restore();
     }
@@ -3585,7 +3603,10 @@ function terrainSpriteReady(type){
 // ungetintet gezeichnet.
 const CITY_SPRITE_FILES = {
   city: 'images/city/city.webp',
-  capital: 'images/city/capital.webp'
+  capital: 'images/city/capital.webp',
+  arms: 'images/city/arms.webp',
+  airbase: 'images/city/airbase.webp',
+  harbor: 'images/city/harbor.webp'
 };
 const citySpriteImages = {};
 for(const type in CITY_SPRITE_FILES){
@@ -3620,6 +3641,36 @@ function getTintedCitySprite(type, owner){
 const ruinSpriteImage = new Image();
 ruinSpriteImage.src = 'images/city/ruin.webp';
 function ruinSpriteReady(){ return graphicsEnabled() && ruinSpriteImage.complete && ruinSpriteImage.naturalWidth > 0; }
+
+/* ---------- FESTUNG / RADAR (Enhanced, optional mit Fallback auf Vektor) ---------- */
+// Festung gehört keiner Partei (Verteidigungsbonus gilt für jeden, der dort steht) und
+// bleibt daher ungetintet, wie die Ruine. Radar ist wie eine Stadt eine erobbare, einem
+// Besitzer gehörende Struktur und wird entsprechend eingefärbt.
+const fortressSpriteImage = new Image();
+fortressSpriteImage.src = 'images/structures/fortress.webp';
+function fortressSpriteReady(){ return graphicsEnabled() && fortressSpriteImage.complete && fortressSpriteImage.naturalWidth > 0; }
+
+const radarSpriteImage = new Image();
+radarSpriteImage.src = 'images/structures/radar.webp';
+function radarSpriteReady(){ return graphicsEnabled() && radarSpriteImage.complete && radarSpriteImage.naturalWidth > 0; }
+const tintedRadarSpriteCache = {};
+function getTintedRadarSprite(owner){
+  let canvas = tintedRadarSpriteCache[owner];
+  if(canvas) return canvas;
+  const img = radarSpriteImage;
+  const w = img.naturalWidth, h = img.naturalHeight;
+  canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const c = canvas.getContext('2d');
+  c.drawImage(img, 0, 0);
+  c.globalCompositeOperation = 'color';
+  c.fillStyle = OWNER_COLORS[owner] || OWNER_COLORS[OWNER_NEUTRAL];
+  c.fillRect(0, 0, w, h);
+  c.globalCompositeOperation = 'destination-in';
+  c.drawImage(img, 0, 0);
+  tintedRadarSpriteCache[owner] = canvas;
+  return canvas;
+}
 
 function drawUnitShape(type, isAir){
   gctx.beginPath();
