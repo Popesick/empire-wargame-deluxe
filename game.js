@@ -1246,8 +1246,12 @@ function captureCity(x,y, owner, capturingUnit, deferMorph){
   tile.buildPoints = 0;
   tile.buildType = 'infantry';
   tile.rallyPoint = null;
+  // Bug (gemeldet): die Bedingung stand vorher andersherum (hp >= max), sodass ein Panzer,
+  // der eine Stadt VÖLLIG UNBESCHADET erobert, zu Infanterie degradiert wurde — gerade der
+  // Erfolgsfall wurde also "bestraft". Richtig ist: nur ein im Kampf beschädigter Panzer
+  // (hp < max) wird zur Garnisons-Infanterie umgewandelt; unbeschadet bleibt er ein Panzer.
   const stats = UNIT_STATS[capturingUnit.type];
-  if(stats.captureMorph && capturingUnit.hp >= effStat(capturingUnit,'hp')){
+  if(stats.captureMorph && capturingUnit.hp < effStat(capturingUnit,'hp')){
     if(deferMorph) capturingUnit.pendingCaptureMorph = { owner, x, y, type: stats.captureMorph };
     else { destroyUnit(capturingUnit); spawnUnit(owner, stats.captureMorph, x, y); }
   }
