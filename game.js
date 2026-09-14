@@ -3256,6 +3256,10 @@ function recomputeVisibility(){
   const sources = [];
   for(const u of unitsOf(OWNER_PLAYER)) sources.push({x:u.x, y:u.y, range: sightRangeOf(u)});
   for(const c of citiesOf(OWNER_PLAYER)) sources.push({x:c.x, y:c.y, range: SIGHT_RANGE.ground});
+  // Enhanced: eine eigene Radarstation deckt dauerhaft einen großen Radius auf, unabhängig
+  // von Einheiten/Städten in der Nähe (radarPositions wird pro Zug in refreshRadarPositions
+  // aktualisiert, kein Kartenscan bei jedem Aufruf hier).
+  for(const r of radarPositions) if(r.owner===OWNER_PLAYER) sources.push({x:r.x, y:r.y, range: RADAR_SIGHT_RANGE});
   for(const src of sources){
     for(const [nx,ny] of tilesInRadius(src.x, src.y, src.range)){
       const k = key(nx,ny);
