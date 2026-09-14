@@ -120,7 +120,7 @@ const EXPERIENCE_WINS_NEEDED = { proven:3, hardened:6 };
 // Werte grob am Original "Empire" orientiert (eigene, angepasste Balance).
 const UNIT_STATS = {
   infantry:   { name:'Infanterie',    label:'I', category:'ground', subclass:'land', move:3,  dmg:1, power:50, defense:50, hp:3,  cost:10, range:0, canDigIn:true },
-  tank:       { name:'Panzer',        label:'T', category:'ground', subclass:'land', move:6,  dmg:2, power:65, defense:55, hp:5,  cost:20, range:0, canDigIn:true, captureMorph:'infantry' },
+  tank:       { name:'Panzer',        label:'T', category:'ground', subclass:'land', move:6,  dmg:2, power:65, defense:55, hp:5,  cost:20, range:0, canDigIn:true },
   artillery:  { name:'Artillerie',    label:'A', category:'ground', subclass:'land', move:3,  dmg:2, power:55, defense:35, hp:3,  cost:18, range:2, canDigIn:true, canDefensiveFire:true },
   destroyer:  { name:'Zerstörer',     label:'D', category:'ground', subclass:'sea',  move:6,  dmg:2, power:60, defense:50, hp:6,  cost:22, range:1, canDefensiveFire:true, portageCapacity:1, canCarry:['infantry','artillery'] },
   transport:  { name:'Transportschiff', label:'X', category:'ground', subclass:'sea', move:5, dmg:1, power:25, defense:30, hp:5,  cost:22, range:0, portageCapacity:4, canCarry:['infantry','tank','artillery'] },
@@ -173,6 +173,7 @@ let turnNumber = 1;
 let selectedUnit = null;
 let reachableTiles = [];
 let reachDist = {};
+let reachPrev = {};
 let attackableTiles = [];
 let rangedTiles = [];
 let rangeRadiusTiles = []; // alle Felder innerhalb der Fernkampf-Reichweite, unabhängig von einem Ziel dort
@@ -1013,6 +1014,7 @@ function slotStatus(x,y,unit){
 function computeReachable(unit){
   const budget = unit.movesLeft;
   const dist = { [key(unit.x,unit.y)]: 0 };
+  const prev = {};
   const frontier = [{x:unit.x,y:unit.y,d:0}];
   const result = [];
   while(frontier.length){
@@ -1034,13 +1036,32 @@ function computeReachable(unit){
       const k = key(nx,ny);
       if(dist[k] !== undefined && dist[k] <= nd) continue;
       dist[k] = nd;
+      prev[k] = key(cur.x,cur.y);
       frontier.push({x:nx,y:ny,d:nd});
       result.push({x:nx,y:ny});
     }
   }
   const seen = new Set(), final = [];
   for(const r of result){ const k=key(r.x,r.y); if(!seen.has(k)){ seen.add(k); final.push(r); } }
-  return { tiles: final, dist };
+  return { tiles: final, dist, prev };
+}
+
+// Rekonstruiert aus den prev-Zeigern von computeReachable die tatsächlich zurückgelegte
+// Kachelfolge von der Ursprungsposition (originKey) bis (destX,destY) — wird gebraucht, um
+// bei einem Klick-Zug (der die Einheit direkt aufs Zielfeld setzt, ohne Schritt-für-Schritt-
+// Bewegung) trotzdem jede durchquerte Kachel für den Nebel des Krieges aufzudecken.
+function reconstructReachPath(prev, originKey, destX, destY){
+  const path = [];
+  let k = key(destX, destY);
+  const guard = new Set();
+  while(k !== undefined && !guard.has(k)){
+    guard.add(k);
+    const [px, py] = k.split(',').map(Number);
+    path.push({x:px, y:py});
+    if(k === originKey) break;
+    k = prev[k];
+  }
+  return path;
 }
 
 // Vollständiger Pfad zu einem Ziel OHNE Rundenbudget-Deckel (für KI-Marsch über mehrere
@@ -1235,33 +1256,13 @@ function resolveRangedAttack(attacker, defender){
   return { destroyed:false, hitAny };
 }
 
-// deferMorph: bei Spieler-Angriffen (mit Kampf-Blink-Sequenz) soll der sichtbare
-// Panzer→Infanterie-Tausch (captureMorph) erst NACH der Sequenz passieren, sonst stünde
-// die neue Garnisonseinheit schon während des Blinkens sichtbar in der Stadt. In dem Fall
-// wird der Tausch nur vorgemerkt (unit.pendingCaptureMorph) statt sofort ausgeführt.
-function captureCity(x,y, owner, capturingUnit, deferMorph){
+function captureCity(x,y, owner, capturingUnit){
   const tile = map[y][x];
   if(tile.type !== T_CITY) return;
   tile.owner = owner;
   tile.buildPoints = 0;
   tile.buildType = 'infantry';
   tile.rallyPoint = null;
-  // Bug (gemeldet): die Bedingung stand vorher andersherum (hp >= max), sodass ein Panzer,
-  // der eine Stadt VÖLLIG UNBESCHADET erobert, zu Infanterie degradiert wurde — gerade der
-  // Erfolgsfall wurde also "bestraft". Richtig ist: nur ein im Kampf beschädigter Panzer
-  // (hp < max) wird zur Garnisons-Infanterie umgewandelt; unbeschadet bleibt er ein Panzer.
-  const stats = UNIT_STATS[capturingUnit.type];
-  if(stats.captureMorph && capturingUnit.hp < effStat(capturingUnit,'hp')){
-    if(deferMorph) capturingUnit.pendingCaptureMorph = { owner, x, y, type: stats.captureMorph };
-    else { destroyUnit(capturingUnit); spawnUnit(owner, stats.captureMorph, x, y); }
-  }
-}
-
-function applyPendingCaptureMorph(unit){
-  if(!unit || !unit.pendingCaptureMorph) return;
-  const { owner, x, y, type } = unit.pendingCaptureMorph;
-  destroyUnit(unit);
-  spawnUnit(owner, type, x, y);
 }
 
 // Enhanced: Verbrannte Erde — der Eigentümer selbst zerstört seine Stadt, bevor der Gegner
@@ -1305,7 +1306,7 @@ function resolveCityDefenseCombat(attacker){
 // Versucht, eine unbesetzte gegnerische/neutrale Stadt oder einen Flughafen zu übernehmen
 // (Flughäfen ohne eigene Verteidigung, Städte mit virtuellem Infanterie-Kampf).
 // Gibt zurück, ob der Angreifer den Vorgang überlebt hat.
-function tryCaptureStructure(unit, x, y, deferMorph){
+function tryCaptureStructure(unit, x, y){
   const tile = map[y][x];
   // Radarstationen (Enhanced) verhalten sich wie Flughäfen: keine eigene Verteidigung,
   // Landeinheiten übernehmen sie kampflos.
@@ -1319,7 +1320,7 @@ function tryCaptureStructure(unit, x, y, deferMorph){
   if(tile.type===T_CITY && !tile.ruined && tile.owner!==unit.owner){
     const survived = resolveCityDefenseCombat(unit);
     MusicEngine.start();
-    if(survived) captureCity(x, y, unit.owner, unit, deferMorph);
+    if(survived) captureCity(x, y, unit.owner, unit);
     return survived;
   }
   return true;
@@ -1435,6 +1436,7 @@ function advanceWaypoint(unit){
     unit.movesLeft -= cost;
     unit.x = step.x; unit.y = step.y;
     unit.actedAtAll = true;
+    revealPathFog(unit, [step]);
     refuelIfOnOwnCity(unit);
     const tile = map[step.y][step.x];
     if((tile.type===T_CITY || tile.type===T_AIRPORT || tile.type===T_RADAR) && tile.owner!==unit.owner && stats.subclass==='land'){
@@ -1494,6 +1496,7 @@ function advancePatrol(unit){
     unit.movesLeft -= cost;
     unit.x = step.x; unit.y = step.y;
     unit.actedAtAll = true;
+    revealPathFog(unit, [step]);
     refuelIfOnOwnCity(unit);
     const tile = map[step.y][step.x];
     if((tile.type===T_CITY || tile.type===T_AIRPORT || tile.type===T_RADAR) && tile.owner!==unit.owner && stats.subclass==='land'){
@@ -1528,9 +1531,10 @@ function selectUnit(u){
   selectedUnit = u;
   closeBuildPanel();
   unloadingCargoUnit = null;
-  const reach = (u.dugIn || u.movesLeft<=0) ? { tiles: [], dist: { [key(u.x,u.y)]: 0 } } : computeReachable(u);
+  const reach = (u.dugIn || u.movesLeft<=0) ? { tiles: [], dist: { [key(u.x,u.y)]: 0 }, prev: {} } : computeReachable(u);
   reachableTiles = reach.tiles;
   reachDist = reach.dist;
+  reachPrev = reach.prev;
   attackableTiles = [];
   rangedTiles = [];
   rangeRadiusTiles = [];
@@ -2156,7 +2160,7 @@ function handleGameClick(sx, sy){
           canEnter = res.entered && terrainAllowed(destTile, selectedUnit);
           if(canEnter){
             if(((destTile.type===T_CITY && !destTile.ruined) || destTile.type===T_AIRPORT || destTile.type===T_RADAR) && destTile.owner!==selectedUnit.owner && stats.subclass==='land'){
-              if(destTile.type===T_CITY) captureCity(x,y, selectedUnit.owner, selectedUnit, true);
+              if(destTile.type===T_CITY) captureCity(x,y, selectedUnit.owner, selectedUnit);
               else destTile.owner = selectedUnit.owner;
             }
             updateInfoPanel('Gegner besiegt, Feld eingenommen!');
@@ -2173,12 +2177,8 @@ function handleGameClick(sx, sy){
         // während der Ausgang (Blinken) noch offen ist.
         playCombatSequence(attackerSnap, defenderSnap, () => {
           if(canEnter && units.includes(finishedUnit)){
-            if(finishedUnit.pendingCaptureMorph){
-              applyPendingCaptureMorph(finishedUnit);
-            } else {
-              finishedUnit.x = x; finishedUnit.y = y;
-              queueMoveAnim(finishedUnit, animFromX, animFromY);
-            }
+            finishedUnit.x = x; finishedUnit.y = y;
+            queueMoveAnim(finishedUnit, animFromX, animFromY);
           }
           finishUnitTurnAfterAnim(finishedUnit);
         });
@@ -2191,7 +2191,7 @@ function handleGameClick(sx, sy){
       const cityOwnerBefore = map[y][x].owner;
       const wasAirport = map[y][x].type===T_AIRPORT || map[y][x].type===T_RADAR;
       const defenderSnap = { x, y, type:'infantry', owner: cityOwnerBefore };
-      const survived = tryCaptureStructure(selectedUnit, x, y, true);
+      const survived = tryCaptureStructure(selectedUnit, x, y);
       const capturedType = map[y][x].type;
       if(survived){
         updateInfoPanel(capturedType===T_AIRPORT ? 'Flughafen erobert!' : (capturedType===T_RADAR ? 'Radarstation erobert!' : 'Stadt erobert!'));
@@ -2202,12 +2202,8 @@ function handleGameClick(sx, sy){
       const finishedUnit = selectedUnit;
       const enterField = () => {
         if(!survived || !units.includes(finishedUnit)) return;
-        if(finishedUnit.pendingCaptureMorph){
-          applyPendingCaptureMorph(finishedUnit);
-        } else {
-          finishedUnit.x = x; finishedUnit.y = y;
-          queueMoveAnim(finishedUnit, animFromX, animFromY);
-        }
+        finishedUnit.x = x; finishedUnit.y = y;
+        queueMoveAnim(finishedUnit, animFromX, animFromY);
       };
       if(wasAirport){
         // Flughäfen haben keine eigene Verteidigung — kein Kampf, die Bewegung darf sofort
@@ -2231,6 +2227,10 @@ function handleGameClick(sx, sy){
       const hostAtDest = units.find(o => o.x===x && o.y===y && o.hp>0 && o.owner===selectedUnit.owner &&
         UNIT_STATS[o.type].canCarry && UNIT_STATS[o.type].canCarry.includes(selectedUnit.type));
       const costUsed = reachDist[key(x,y)] || 0;
+      // Klick-Zug setzt die Einheit direkt aufs Zielfeld (kein Schritt-für-Schritt-Marsch wie
+      // bei Wegpunkt/Patrouille) — ohne das hier bliebe der durchquerte Weg im Nebel, obwohl
+      // die Einheit ihn gerade physisch abgefahren ist (gemeldeter Bug).
+      revealPathFog(selectedUnit, reconstructReachPath(reachPrev, key(animFromX,animFromY), x, y));
       selectedUnit.movesLeft = Math.max(0, selectedUnit.movesLeft - costUsed);
       selectedUnit.actedAtAll = true;
       if(selectedUnit.movesLeft<=0) selectedUnit.moved = true;
@@ -2254,7 +2254,7 @@ function handleGameClick(sx, sy){
           // damit sie nicht schon während der Blink-Sequenz dort steht.
           const attackerSnap = snapshotUnit(selectedUnit); // noch an der alten Position
           const defenderSnap = { x, y, type:'infantry', owner: destTile.owner };
-          const survived = tryCaptureStructure(selectedUnit, x, y, true);
+          const survived = tryCaptureStructure(selectedUnit, x, y);
           // Positionswechsel bewusst NICHT hier, sondern erst im finish()-Callback nach der
           // Kampfsequenz (siehe unten) — sonst stünde die Einheit optisch schon in der Stadt.
           updateInfoPanel(survived ? 'Stadt erobert!' : 'Angriff auf die Stadtverteidigung gescheitert — Einheit verloren!');
@@ -2291,12 +2291,8 @@ function handleGameClick(sx, sy){
       if(cityCombat){
         playCombatSequence(cityCombat.attackerSnap, cityCombat.defenderSnap, () => {
           if(cityCombat.survived && units.includes(movedUnit)){
-            if(movedUnit.pendingCaptureMorph){
-              applyPendingCaptureMorph(movedUnit);
-            } else {
-              movedUnit.x = x; movedUnit.y = y;
-              queueMoveAnim(movedUnit, animFromX, animFromY);
-            }
+            movedUnit.x = x; movedUnit.y = y;
+            queueMoveAnim(movedUnit, animFromX, animFromY);
           }
           finish();
         });
@@ -3223,24 +3219,48 @@ const EFF_COLORS = { fresh:'#5ad65a', rested:'#5ad65a', ready:'#5ad65a', used:'#
 let visibleSet = new Set();
 let exploredSet = new Set();
 
+// Liefert alle Kachelkoordinaten innerhalb von `range` um (cx,cy) (Kreisradius, keine
+// Sichtlinien-/Geländeprüfung) — gemeinsam genutzt von recomputeVisibility (aktuelle Sicht)
+// und revealPathFog (Nebel entlang eines zurückgelegten Bewegungswegs, siehe dort).
+function tilesInRadius(cx, cy, range){
+  const out = [];
+  for(let dy=-range; dy<=range; dy++){
+    for(let dx=-range; dx<=range; dx++){
+      if(dx*dx+dy*dy > range*range+1) continue;
+      const nx=cx+dx, ny=cy+dy;
+      if(inBounds(nx,ny)) out.push([nx,ny]);
+    }
+  }
+  return out;
+}
+function sightRangeOf(unit){
+  return UNIT_STATS[unit.type].category==='air' ? SIGHT_RANGE.air : SIGHT_RANGE.ground;
+}
+
+// Deckt entlang JEDER Kachel in `path` (nicht nur am Ziel) den Nebel dauerhaft auf — sonst
+// bliebe der Weg foggy, obwohl die Einheit ihn gerade physisch durchquert hat (gemeldeter
+// Bug). `path` ist eine Liste von {x,y}-Punkten, z.B. aus reconstructReachPath() oder
+// Schritt für Schritt beim Marsch/Patrouille gesammelt.
+function revealPathFog(unit, path){
+  if(!fogEnabled || unit.owner!==OWNER_PLAYER) return;
+  const range = sightRangeOf(unit);
+  for(const step of path){
+    for(const [nx,ny] of tilesInRadius(step.x, step.y, range)) exploredSet.add(key(nx,ny));
+  }
+}
+
 function recomputeVisibility(){
   if(!fogEnabled) return;
   visibleSet = new Set();
   const exploredBefore = exploredSet.size;
   const sources = [];
-  for(const u of unitsOf(OWNER_PLAYER)) sources.push({x:u.x, y:u.y, range: UNIT_STATS[u.type].category==='air' ? SIGHT_RANGE.air : SIGHT_RANGE.ground});
+  for(const u of unitsOf(OWNER_PLAYER)) sources.push({x:u.x, y:u.y, range: sightRangeOf(u)});
   for(const c of citiesOf(OWNER_PLAYER)) sources.push({x:c.x, y:c.y, range: SIGHT_RANGE.ground});
   for(const src of sources){
-    const r = src.range;
-    for(let dy=-r; dy<=r; dy++){
-      for(let dx=-r; dx<=r; dx++){
-        if(dx*dx+dy*dy > r*r+1) continue;
-        const nx=src.x+dx, ny=src.y+dy;
-        if(!inBounds(nx,ny)) continue;
-        const k = key(nx,ny);
-        visibleSet.add(k);
-        exploredSet.add(k);
-      }
+    for(const [nx,ny] of tilesInRadius(src.x, src.y, src.range)){
+      const k = key(nx,ny);
+      visibleSet.add(k);
+      exploredSet.add(k);
     }
   }
   // Die Minimap-Terrainkachel ist ein Cache über die ganze Karte (siehe
