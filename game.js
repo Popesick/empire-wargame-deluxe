@@ -88,7 +88,7 @@ const T_RADAR = 'radar'; // Enhanced: von Ingenieuren gebaute Struktur, siehe tr
 
 const MOVE_COST = { [T_PLAIN]:1, [T_FOREST]:2, [T_HILLS]:2, [T_MOUNTAIN]:3, [T_WATER]:1, [T_CITY]:1, [T_AIRPORT]:1, [T_RADAR]:1 };
 const SIGHT_RANGE = { ground:2, air:4 };
-const RADAR_SIGHT_RANGE = 12; // Enhanced: Radius, den eine Radarstation dauerhaft aufdeckt
+const RADAR_SIGHT_RANGE = 9; // Enhanced: Radius, den eine Radarstation dauerhaft aufdeckt
 
 /* ---------- KONSTANTEN: SPIELER ---------- */
 const OWNER_PLAYER = 'player';
