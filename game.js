@@ -72,6 +72,10 @@ const DIFFICULTY_ORDER = { easy:0, medium:1, hard:2 };
 function difficultyAtLeast(level){
   return DIFFICULTY_ORDER[mapConfig.difficulty||'easy'] >= DIFFICULTY_ORDER[level];
 }
+// Feste Landmasse: alle Parteien starten auf demselben zusammenhängenden Land, Inselhüpfen
+// per Transporter/Sammelstadt ergibt hier keinen Sinn — medium/hard setzen stattdessen auf
+// schnelle Panzer-Angriffe und zügige Städte-Einnahme (siehe pickAiBuildType/aiActUnit).
+function isLandmassSetting(){ return mapConfig.landform === 'continent'; }
 // Grafik-Umschalter für Leute, die den schlichten Vektor-Look bevorzugen — die eigentliche
 // Umschaltung passiert dadurch, dass spriteReady()/terrainSpriteReady()/citySpriteReady()
 // hierüber gehen: bei 'vector' melden sie einfach "kein Sprite verfügbar", und die überall
@@ -2503,6 +2507,11 @@ function pickAiBuildType(coastal, tile){
   else if(t < 14) weights = { infantry:0.28, tank:0.24, artillery:0.14, destroyer:0.08, transport:0.08, battleship:0.04, carrier:0.02, submarine:0.04, helicopter:0.06, fighter:0.02 };
   else weights = { infantry:0.16, tank:0.2, artillery:0.1, destroyer:0.08, transport:0.08, battleship:0.1, carrier:0.06, submarine:0.08, helicopter:0.08, fighter:0.06 };
   if(!coastal) weights = Object.assign({}, weights, { destroyer:0, transport:0, battleship:0, carrier:0, submarine:0 });
+  // KI-Schwierigkeit medium+ auf durchgehender Landmasse: durchgehend starker Panzer-Fokus
+  // für schnelle Angriffe statt nur in den ersten Runden (siehe isLandmassSetting).
+  if(difficultyAtLeast('medium') && isLandmassSetting()){
+    weights = Object.assign({}, weights, { tank: (weights.tank||0) + 0.25 });
+  }
   // Enhanced: KI baut auch Ingenieure, damit sie Straßen/Eisenbahn/Festungen/Radar
   // tatsächlich einsetzt — moderates Gewicht, kein Kampfwert also nicht zu viele davon.
   if(isEnhanced()) weights = Object.assign({}, weights, { engineer: t < 6 ? 0.1 : 0.12 });
@@ -2903,8 +2912,10 @@ function aiConsiderInvasion(owner){
 function runAiOwnerTurn(owner){
   if(gameOver) return;
   processOrderStates(owner);
-  if(difficultyAtLeast('medium')) ensureRallyCity(owner);
-  if(difficultyAtLeast('hard')) aiConsiderInvasion(owner);
+  // Sammelstadt/Großangriff sind Insel-Logistik (Transporter zwischen Landmassen) — auf
+  // einer durchgehenden Landmasse ergeben sie keinen Sinn, siehe isLandmassSetting().
+  if(difficultyAtLeast('medium') && !isLandmassSetting()) ensureRallyCity(owner);
+  if(difficultyAtLeast('hard') && !isLandmassSetting()) aiConsiderInvasion(owner);
 
   const myUnits = () => unitsOf(owner).filter(u=>u.hp>0 && !u.moved);
   for(const u of myUnits()){
@@ -3077,12 +3088,18 @@ function aiActUnit(unit){
   let best=null, bestDist=Infinity;
   for(const t of targets){
     let d = Math.abs(t.x-unit.x)+Math.abs(t.y-unit.y);
-    // KI-Schwierigkeit medium+: weiche Ziele (Transporter/Artillerie) bevorzugen — ein
-    // Distanz-Bonus statt einer harten Sortierung, damit ein direkt angrenzendes hartes
-    // Ziel weiterhin Vorrang vor einem weit entfernten weichen Ziel hat.
+    // KI-Schwierigkeit medium+: ein Distanz-Bonus statt einer harten Sortierung, damit ein
+    // direkt angrenzendes hartes Ziel weiterhin Vorrang vor einem weit entfernten
+    // bevorzugten Ziel hat. Auf einer durchgehenden Landmasse zählt schnelle Städte-
+    // Einnahme (siehe isLandmassSetting), auf Inseln/Archipel weiche Ziele
+    // (Transporter/Artillerie) — Inselhüpfen macht Einheiten-Jagd sonst zu langsam.
     if(difficultyAtLeast('medium')){
-      const occupant = units.find(o=>o.x===t.x && o.y===t.y && o.hp>0 && !o.hostId && o.owner!==unit.owner);
-      if(occupant && (occupant.type==='transport' || occupant.type==='artillery')) d -= 3;
+      if(isLandmassSetting()){
+        if(map[t.y][t.x].type===T_CITY) d -= 3;
+      } else {
+        const occupant = units.find(o=>o.x===t.x && o.y===t.y && o.hp>0 && !o.hostId && o.owner!==unit.owner);
+        if(occupant && (occupant.type==='transport' || occupant.type==='artillery')) d -= 3;
+      }
     }
     if(d<bestDist){ bestDist=d; best=t; }
   }
