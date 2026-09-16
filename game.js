@@ -63,7 +63,15 @@ const SIZE_PRESETS = {
 };
 const CITY_TILES_PER_CITY = { sparse:70, normal:44, dense:28 };
 
-let mapConfig = { mode:'classic', size:'medium', landform:'continent', landAmount:'normal', cities:'normal', aiCount:1, fogOfWar:'off', animEnabled:'on', graphics:'sprites' };
+let mapConfig = { mode:'classic', size:'medium', landform:'continent', landAmount:'normal', cities:'normal', aiCount:1, fogOfWar:'off', animEnabled:'on', graphics:'sprites', difficulty:'easy' };
+// KI-Schwierigkeitsgrad: einmalige Wahl beim Kartenaufbau, danach für die ganze Partie fest
+// (siehe setup-screen) — Stufen sind additiv (hard impliziert medium), damit jede neue
+// Verhaltensstufe als zusätzlicher Zweig in den bestehenden KI-Funktionen ergänzt werden
+// kann statt sie zu kopieren. 'easy' durchläuft keinen einzigen neuen Codepfad.
+const DIFFICULTY_ORDER = { easy:0, medium:1, hard:2 };
+function difficultyAtLeast(level){
+  return DIFFICULTY_ORDER[mapConfig.difficulty||'easy'] >= DIFFICULTY_ORDER[level];
+}
 // Grafik-Umschalter für Leute, die den schlichten Vektor-Look bevorzugen — die eigentliche
 // Umschaltung passiert dadurch, dass spriteReady()/terrainSpriteReady()/citySpriteReady()
 // hierüber gehen: bei 'vector' melden sie einfach "kein Sprite verfügbar", und die überall
@@ -183,6 +191,7 @@ let gameOver = false;
 let coalitionAgainst = null; // Enhanced: owner-id, gegen den sich alle anderen verbünden
 let lastStandActive = false; // Enhanced: ab 80% Städtekontrolle einer Partei aktiv
 let lastStandOwner = null; // die dominante Partei selbst profitiert NICHT vom Last-Stand-Bonus
+let rallyCityByOwner = {}; // KI-Schwierigkeit medium+: owner -> {x,y} der gewählten Sammelstadt
 let selectedBuildCity = null;
 let awaitingWaypointClick = false;
 let awaitingPatrolStep = 0; // 0=inaktiv, 1=wartet auf Punkt A, 2=wartet auf Punkt B
@@ -4093,6 +4102,7 @@ function initGame(){
   lastStandActive = false;
   lastStandOwner = null;
   radarPositions = [];
+  rallyCityByOwner = {};
   closeBuildPanel();
   document.getElementById('unit-info-panel').classList.add('hidden');
   document.getElementById('game-over').classList.add('hidden');
@@ -4228,6 +4238,7 @@ function loadGameFromSlot(slot){
   dragPreviewTarget = null;
   minimapTerrainCanvas = null;
   selectedBuildCity = null;
+  rallyCityByOwner = {};
 
   document.getElementById('title-screen').classList.add('hidden');
   document.getElementById('setup-screen').classList.add('hidden');
