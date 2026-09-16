@@ -4208,6 +4208,14 @@ function loadGameFromSlot(slot){
   fogEnabled = !!data.fogEnabled;
   exploredSet = new Set(data.exploredSet || []);
   visibleSet = new Set();
+  // Bug (gemeldet, zweite Ursache desselben Hängers): landmassId wird nur bei der
+  // Kartengenerierung berechnet (siehe generateMap) und war beim Laden bisher noch der Stand
+  // aus der aktuellen Session (leer bei frischem Seitenaufruf, sonst die FALSCHE Karte) —
+  // jede KI-Landeinheit ohne erreichbares Ziel stürzte dann in aiSeekTransport ab
+  // (landmassId[y] war undefined), was den KI-Zug endlos hängen ließ. Terrain ändert sich
+  // innerhalb einer Partie nie, also reicht ein einmaliges Neuberechnen wie bei einer neuen
+  // Karte.
+  landmassId = computeLandmasses().id;
   updateDominanceState();
   refreshRadarPositions();
 
@@ -4238,6 +4246,17 @@ function loadGameFromSlot(slot){
   updateInfoPanel(`Spielstand geladen — Runde ${turnNumber}.`);
   render();
   MusicEngine.start();
+
+  // Bug (gemeldet): wurde mitten in einem KI-Zug gespeichert (z.B. in der kurzen Pause
+  // zwischen zwei KI-Parteien, siehe advanceTurn), stand currentTurnOwner beim Laden zwar
+  // korrekt auf der KI, aber nichts stieß ihren Zug tatsächlich an — die Kopfzeile blieb für
+  // immer bei "KI X zieht...", weil der Anschub sonst NUR von advanceTurn() aus dem vorher
+  // laufenden Spiel kommt, das es beim Laden ja nicht gab. Hier denselben Anschub wie in
+  // advanceTurn() nachholen, ohne turnIndex/currentTurnOwner erneut zu verändern.
+  if(!gameOver && currentTurnOwner !== OWNER_PLAYER){
+    if(isEliminated(currentTurnOwner)) setTimeout(advanceTurn, 20);
+    else setTimeout(() => runAiOwnerTurn(currentTurnOwner), 350);
+  }
   return true;
 }
 
