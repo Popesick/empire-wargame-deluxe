@@ -96,7 +96,7 @@ const T_MOUNTAIN = 'mountain';
 const T_WATER = 'water';
 const T_CITY = 'city';
 const T_AIRPORT = 'airport';
-const T_RADAR = 'radar'; // Enhanced: von Ingenieuren gebaute Struktur, siehe tryCaptureStructure
+const T_RADAR = 'radar'; // Enhanced: von Ingenieuren gebaute Struktur, siehe resolveStructureAttack
 
 const MOVE_COST = { [T_PLAIN]:1, [T_FOREST]:2, [T_HILLS]:2, [T_MOUNTAIN]:3, [T_WATER]:1, [T_CITY]:1, [T_AIRPORT]:1, [T_RADAR]:1 };
 const SIGHT_RANGE = { ground:2, air:4 };
@@ -449,7 +449,15 @@ function snapshotUnit(u){
 function newTile(type){
   return { type, owner:null, buildPoints:0, buildType:'infantry', capital:false, road:false,
     rail:false, fortress:false, ruined:false,
-    specialization:null, pendingSpecialization:null, specializationTimer:0 };
+    specialization:null, pendingSpecialization:null, specializationTimer:0,
+    // Enhanced: 0=keine Festung, 1=fertiggestellt (Infanterie-Niveau), 2=Festungsverteidigung
+    // verbessert (Panzer-Niveau) — siehe resolveStructureAttack/completeConstructionStep.
+    fortressLevel:0,
+    // Enhanced: Stadtverteidigung verbessern abgeschlossen (0/1) — siehe resolveStructureAttack.
+    cityDefenseLevel:0,
+    // Markiert eine per Ingenieur ("Stadt gründen") neu geschaffene Stadt, unterscheidet sie
+    // von ursprünglich kartengenerierten Städten (für KI-Zielwert-Zählung, siehe Phase 3).
+    founded:false };
 }
 
 function rollTerrain(){
@@ -951,7 +959,11 @@ function completeConstructionStep(unit){
   } else if(order.type==='rail'){
     tile.road = true; tile.rail = true;
   } else if(order.type==='fortress'){
+    // Enhanced: eine Festung ist eine eroberbare Struktur wie eine Stadt (siehe
+    // resolveStructureAttack), gehört ab Fertigstellung ihrem Erbauer auf Infanterie-Niveau.
     tile.fortress = true;
+    tile.owner = unit.owner;
+    tile.fortressLevel = 1;
     unit.buildOrder = null; unit.moved = false;
     updateInfoPanel('Festung fertiggestellt.');
     return;
@@ -1166,6 +1178,14 @@ function hitChance(attacker, defender, attackerCrippled){
   chance += effDiff(defender, attacker) * 5;
   if(defender.dugIn) chance -= 15;
   if(attackerCrippled) chance -= 15;
+  // Seeeinheiten in einer Stadt (Hafen) können sich nicht ernsthaft verteidigen: effektive
+  // Verteidigung sinkt um 70% — gilt in beiden Modi (Classic wie Enhanced), keine
+  // Enhanced-Sonderregel. Eine X%-Änderung der defense verschiebt chance um ∓ defense*X*0.6
+  // (siehe die additive Grundformel oben), daher hier als äquivalenter additiver Term.
+  if(defender.x !== undefined && defender.y !== undefined && d.subclass==='sea' &&
+     map[defender.y] && map[defender.y][defender.x] && map[defender.y][defender.x].type===T_CITY){
+    chance += effStat(defender,'defense') * 0.7 * 0.6;
+  }
   if(isEnhanced()){
     const matchup = ENHANCED_MATCHUPS[attacker.type] && ENHANCED_MATCHUPS[attacker.type][defender.type];
     if(matchup) chance += matchup;
@@ -1174,6 +1194,15 @@ function hitChance(attacker, defender, attackerCrippled){
     // dadurch automatisch ausgeschlossen.
     if(defender.x !== undefined && defender.y !== undefined && map[defender.y] && map[defender.y][defender.x] && map[defender.y][defender.x].fortress){
       chance -= (defender.dugIn && defender.type==='infantry') ? 10 : 5;
+    }
+    // Stadtverteidigung/Festungsverteidigung verbessern (Ingenieur-Ausbau): zusätzlicher
+    // Verteidigungsbonus für dort stationierte ECHTE Einheiten, unabhängig vom oben stehenden
+    // Festungs-Bonus (stapelt) und von der virtuellen Struktur-eigenen Verteidigung (siehe
+    // resolveStructureAttack) — die hat wegen fehlender x/y hier ohnehin keinen Effekt.
+    if(defender.x !== undefined && defender.y !== undefined && map[defender.y] && map[defender.y][defender.x]){
+      const defTile = map[defender.y][defender.x];
+      if(defTile.type===T_CITY && defTile.cityDefenseLevel) chance -= effStat(defender,'defense') * 0.20 * 0.6;
+      if(defTile.fortressLevel===2) chance -= effStat(defender,'defense') * 0.10 * 0.6;
     }
     // Radar: eigene Flugzeuge im Umkreis haben einen Vorteil gegen feindliche Flugzeuge.
     if(fogEnabled && a.category==='air' && d.category==='air'){
@@ -1275,6 +1304,20 @@ function resolveRangedAttack(attacker, defender){
   return { destroyed:false, hitAny };
 }
 
+// Wirft alle FREMDEN Lufteinheiten von einem Feld auf ein freies Nachbarfeld — Flugzeuge/
+// Helikopter zählen nie als Verteidigung (siehe groundDefendersAt/resolveStructureAttack),
+// stehen nach einem Besitzerwechsel aber auch nicht mehr auf ihrem alten Flugfeld. Ohne
+// freien Nachbarplatz geht die Einheit verloren (seltener Randfall auf sehr engen Karten).
+function evictAirUnitsNotOwnedBy(x, y, owner){
+  const stranded = units.filter(u => u.x===x && u.y===y && u.hp>0 && !u.hostId && getLevel(u)==='air' && u.owner!==owner);
+  for(const u of stranded){
+    const spot = adjacentTiles(x,y).find(a => terrainAllowed(map[a.y][a.x], u) &&
+      !units.some(o => o.x===a.x && o.y===a.y && o.hp>0 && !o.hostId && getLevel(o)==='air'));
+    if(spot){ u.x = spot.x; u.y = spot.y; }
+    else destroyUnit(u);
+  }
+}
+
 function captureCity(x,y, owner, capturingUnit){
   const tile = map[y][x];
   if(tile.type !== T_CITY) return;
@@ -1282,11 +1325,25 @@ function captureCity(x,y, owner, capturingUnit){
   tile.buildPoints = 0;
   tile.buildType = 'infantry';
   tile.rallyPoint = null;
+  // Enhanced: ein laufender/abgeschlossener Stadtverteidigung-Ausbau geht bei Eroberung
+  // komplett verloren (wie gefordert) — die neue Besatzung erbt keine fremden Befestigungen.
+  tile.cityDefenseLevel = 0;
+  evictAirUnitsNotOwnedBy(x, y, owner);
+}
+
+// Enhanced: Festungen sind (wie Städte) eroberbare Strukturen, produzieren aber nichts.
+// Bei Eroberung fällt die Ausbaustufe auf 1 (Infanterie-Niveau) zurück, analog zum
+// Stadtverteidigung-Ausbau — die neue Besatzung erbt nicht die volle fremde Befestigung.
+function captureFortress(x, y, owner){
+  const tile = map[y][x];
+  tile.owner = owner;
+  tile.fortressLevel = 1;
+  evictAirUnitsNotOwnedBy(x, y, owner);
 }
 
 // Enhanced: Verbrannte Erde — der Eigentümer selbst zerstört seine Stadt, bevor der Gegner
 // sie einnehmen kann. Die Ruine ist danach niemandes Stadt mehr (keine Produktion, keine
-// Eroberung per Kampf, siehe tryCaptureStructure/attackableTiles) und kann nur von einem
+// Eroberung per Kampf, siehe resolveStructureAttack/attackableTiles) und kann nur von einem
 // Ingenieur wiederaufgebaut werden (siehe completeConstructionStep 'rebuild').
 function destroyCity(unit){
   const tile = map[unit.y][unit.x];
@@ -1304,10 +1361,12 @@ function destroyCity(unit){
   finishUnitTurn(unit);
 }
 
-// Unbesetzte Städte verteidigen sich wie eine Infanterie-Einheit ("natürliche Verteidigung").
-// Gibt zurück, ob der Angreifer den Kampf überlebt hat.
-function resolveCityDefenseCombat(attacker){
-  const virtualDefender = { type:'infantry', hp:UNIT_STATS.infantry.hp, effectiveness:EXPERIENCE_CAP.green, dugIn:false };
+// Unbesetzte Städte/Festungen verteidigen sich selbst ("natürliche Verteidigung") — Niveau
+// hängt vom Ausbau ab (Infanterie unausgebaut, Panzer nach Stadtverteidigung/
+// Festungsverteidigung verbessern, siehe resolveStructureAttack). Gibt zurück, ob der
+// Angreifer den Kampf überlebt hat.
+function resolveVirtualDefenseCombat(attacker, statsType){
+  const virtualDefender = { type:statsType, hp:UNIT_STATS[statsType].hp, effectiveness:EXPERIENCE_CAP.green, dugIn:false };
   const attackerCrippled = isCrippled(attacker);
   let rounds = 0;
   while(attacker.hp>0 && virtualDefender.hp>0 && rounds<200){
@@ -1315,34 +1374,83 @@ function resolveCityDefenseCombat(attacker){
     const chance = hitChance(attacker, virtualDefender, attackerCrippled);
     const roll = Math.random()*100;
     if(roll < chance) virtualDefender.hp -= UNIT_STATS[attacker.type].dmg;
-    else attacker.hp -= UNIT_STATS.infantry.dmg;
+    else attacker.hp -= UNIT_STATS[statsType].dmg;
   }
   if(virtualDefender.hp <= 0) return true;
   destroyUnit(attacker);
   return false;
 }
 
-// Versucht, eine unbesetzte gegnerische/neutrale Stadt oder einen Flughafen zu übernehmen
-// (Flughäfen ohne eigene Verteidigung, Städte mit virtuellem Infanterie-Kampf).
-// Gibt zurück, ob der Angreifer den Vorgang überlebt hat.
-function tryCaptureStructure(unit, x, y){
+// Verlegt eine Seeeinheit, die eine Stadt verteidigt und den Kampf überlebt hat, auf ein
+// freies angrenzendes Wasserfeld — eine Seeeinheit am Hafen kann sich nicht ernsthaft
+// verteidigen und bleibt daher nie in der Stadt stehen, egal wie der Kampf ausgeht (verliert
+// sie, ist sie ohnehin tot und es gibt nichts zu verlegen).
+function relocateShipOutOfCity(ship, x, y){
+  const spot = adjacentTiles(x,y).find(a => map[a.y][a.x].type===T_WATER &&
+    !units.some(o => o.x===a.x && o.y===a.y && o.hp>0 && !o.hostId && getLevel(o)==='ground'));
+  if(spot){ ship.x = spot.x; ship.y = spot.y; }
+}
+
+// Gemeinsame Prüfung "ist das eine erobbare Struktur (durch Kampf/Einmarsch)?" — konsolidiert
+// die vorher an vielen Stellen leicht unterschiedlich (teils ohne !ruined-Schutz) wiederholte
+// Bedingung. Eine Festung zählt erst ab tile.fortressLevel>0 (siehe completeConstructionStep).
+function isCapturableStructureTile(tile){
+  return (tile.type===T_CITY && !tile.ruined) || tile.type===T_AIRPORT || tile.type===T_RADAR || tile.fortressLevel>0;
+}
+
+// Zentrale Kampf-/Eroberungs-Entscheidung für einen Angriff auf ein Feld mit Stadt/Flughafen/
+// Radar/Festung. Ersetzt die vormals verstreute Einzeldefender-Logik: zuerst müssen ALLE
+// gestapelten Boden-Verteidiger (Land + Schiffe im Hafen, sie teilen sich denselben
+// 'ground'-Belegungs-Level) einzeln besiegt werden (ein Kampf pro Zug, siehe
+// groundDefendersAt) — erst wenn keiner mehr lebt, kommt die Struktur-eigene Verteidigung
+// (falls vorhanden) und danach frühestens der tatsächliche Besitzerwechsel. Luft-Einheiten
+// zählen nie als Verteidigung; Seeeinheiten können eine Struktur nie übernehmen (nur
+// Landeinheiten erobern) und werden nach einem überlebten Verteidigungskampf sofort wieder
+// aus der Stadt verdrängt. Gibt {winner, entered, captured} zurück.
+function resolveStructureAttack(unit, x, y){
   const tile = map[y][x];
+  const stats = UNIT_STATS[unit.type];
+  const defenders = groundDefendersAt(x, y, unit);
+  if(defenders.length > 0){
+    const defender = defenders[0];
+    const wasShipOnCity = UNIT_STATS[defender.type].subclass==='sea' && tile.type===T_CITY;
+    const res = resolveMeleeAttack(unit, defender, true);
+    MusicEngine.start();
+    if(res.winner==='defender' && wasShipOnCity) relocateShipOutOfCity(defender, x, y);
+    // Nie einrücken/übernehmen nach diesem einen Kampf — es könnten noch weitere Verteidiger
+    // am Feld stehen, das zeigt sich erst beim nächsten Angriff (groundDefendersAt dann leer).
+    return { winner: res.winner, entered:false, captured:false };
+  }
+  // Keine Boden-Verteidiger (mehr): nur Landeinheiten können eine Struktur tatsächlich
+  // übernehmen — eine See-/Lufteinheit kann hier höchstens Verteidiger wegkämpfen (oben),
+  // aber nie selbst einrücken.
+  if(stats.subclass !== 'land') return { winner:'attacker', entered:false, captured:false };
   // Radarstationen (Enhanced) verhalten sich wie Flughäfen: keine eigene Verteidigung,
   // Landeinheiten übernehmen sie kampflos.
   if((tile.type===T_AIRPORT || tile.type===T_RADAR) && tile.owner!==unit.owner){
     tile.owner = unit.owner;
-    return true;
+    evictAirUnitsNotOwnedBy(x, y, unit.owner);
+    return { winner:'attacker', entered:true, captured:true };
+  }
+  // Enhanced: Festung — eroberbar wie eine Stadt, nur ohne Produktion. Verteidigungsniveau
+  // richtet sich nach der Ausbaustufe (1=Infanterie, 2=Panzer nach Festungsverteidigung
+  // verbessern).
+  if(tile.fortressLevel > 0 && tile.owner !== unit.owner){
+    const survived = resolveVirtualDefenseCombat(unit, tile.fortressLevel===2 ? 'tank' : 'infantry');
+    MusicEngine.start();
+    if(survived){ captureFortress(x, y, unit.owner); return { winner:'attacker', entered:true, captured:true }; }
+    return { winner:'defender', entered:false, captured:false };
   }
   // Verbrannte Erde (Enhanced): eine zerstörte Stadt ist nur noch Trümmerfeld — keine
   // Verteidigung, keine Eroberung per Kampf. Nur ein Ingenieur kann sie wiederaufbauen
   // (siehe completeConstructionStep 'rebuild').
   if(tile.type===T_CITY && !tile.ruined && tile.owner!==unit.owner){
-    const survived = resolveCityDefenseCombat(unit);
+    const survived = resolveVirtualDefenseCombat(unit, tile.cityDefenseLevel ? 'tank' : 'infantry');
     MusicEngine.start();
-    if(survived) captureCity(x, y, unit.owner, unit);
-    return survived;
+    if(survived){ captureCity(x, y, unit.owner, unit); return { winner:'attacker', entered:true, captured:true }; }
+    return { winner:'defender', entered:false, captured:false };
   }
-  return true;
+  return { winner:'attacker', entered:true, captured:false };
 }
 
 function refuelIfOnOwnCity(u){
@@ -1396,6 +1504,16 @@ function pickDefenderAt(x,y, attacker){
     if(hits.length>0) return { target: hits[0], noEntry: false };
   }
   return null;
+}
+
+// Liefert ALLE gültigen Boden-Verteidiger (Land- und Seeeinheiten teilen sich denselben
+// 'ground'-Belegungs-Level, siehe getLevel) an einem Feld, älteste zuerst — im Unterschied zu
+// pickDefenderAt() zählt hier explizit KEINE Luft-Einheit mit (siehe resolveStructureAttack:
+// Flugzeuge/Helikopter in einer Stadt gelten nie als Verteidigung).
+function groundDefendersAt(x, y, attacker){
+  return units.filter(u => u.x===x && u.y===y && u.hp>0 && !u.hostId && getLevel(u)==='ground' &&
+    u.owner!==attacker.owner && !areAllied(attacker.owner, u.owner) && canAttackTargetType(attacker.type, u))
+    .sort((a,b) => a.id-b.id);
 }
 
 /* ---------- WEGPUNKT-MARSCHBEFEHLE ---------- */
@@ -1458,8 +1576,9 @@ function advanceWaypoint(unit){
     revealPathFog(unit, [step]);
     refuelIfOnOwnCity(unit);
     const tile = map[step.y][step.x];
-    if((tile.type===T_CITY || tile.type===T_AIRPORT || tile.type===T_RADAR) && tile.owner!==unit.owner && stats.subclass==='land'){
-      if(!tryCaptureStructure(unit, step.x, step.y)){ queueMoveAnim(unit, animFromX, animFromY); return; } // Einheit an Stadtverteidigung gescheitert
+    if(isCapturableStructureTile(tile) && tile.owner!==unit.owner && stats.subclass==='land'){
+      const res = resolveStructureAttack(unit, step.x, step.y);
+      if(res.winner==='defender'){ queueMoveAnim(unit, animFromX, animFromY); return; } // Einheit an Stadtverteidigung gescheitert
     }
     // Adjazenter Feind nach dem Schritt -> ebenfalls abbrechen (Feindkontakt)
     if(adjacentTiles(unit.x,unit.y).some(t => pickDefenderAt(t.x,t.y,unit))){
@@ -1518,8 +1637,9 @@ function advancePatrol(unit){
     revealPathFog(unit, [step]);
     refuelIfOnOwnCity(unit);
     const tile = map[step.y][step.x];
-    if((tile.type===T_CITY || tile.type===T_AIRPORT || tile.type===T_RADAR) && tile.owner!==unit.owner && stats.subclass==='land'){
-      if(!tryCaptureStructure(unit, step.x, step.y)){ queueMoveAnim(unit, animFromX, animFromY); return; }
+    if(isCapturableStructureTile(tile) && tile.owner!==unit.owner && stats.subclass==='land'){
+      const res = resolveStructureAttack(unit, step.x, step.y);
+      if(res.winner==='defender'){ queueMoveAnim(unit, animFromX, animFromY); return; }
     }
     if(enemyWithinRadius(unit, effStat(unit,'move'))){
       updateInfoPanel(`${ownerLabel(unit.owner)}: Patrouille unterbrochen — Feind im Bewegungsradius.`);
@@ -2228,23 +2348,20 @@ function handleGameClick(sx, sy){
 
     if(attackableTiles.some(t=>t.x===x && t.y===y)){
       const animFromX = selectedUnit.x, animFromY = selectedUnit.y;
-      const def = pickDefenderAt(x,y,selectedUnit);
-      if(def){
+      const destTile = map[y][x];
+      if(isCapturableStructureTile(destTile) && destTile.owner!==selectedUnit.owner){
+        // Zentrale Reihenfolge (siehe resolveStructureAttack): erst alle Boden-Verteidiger
+        // einzeln, dann die Struktur-eigene Verteidigung, erst dann der Einzug — Luft-
+        // Einheiten am Feld zählen dabei nie als Verteidigung.
         const attackerSnap = snapshotUnit(selectedUnit);
-        const defenderSnap = snapshotUnit(def.target);
-        const res = resolveMeleeAttack(selectedUnit, def.target, def.noEntry);
-        let canEnter = false;
+        const groundDef = groundDefendersAt(x, y, selectedUnit)[0];
+        const virtualType = (destTile.fortressLevel===2 || destTile.cityDefenseLevel) ? 'tank' : 'infantry';
+        const defenderSnap = groundDef ? snapshotUnit(groundDef) : { x, y, type:virtualType, owner: destTile.owner };
+        const res = resolveStructureAttack(selectedUnit, x, y);
         if(res.winner==='attacker'){
-          const destTile = map[y][x];
-          // Landeinheiten dürfen Wassereinheiten (und umgekehrt Schiffe Landfelder) nie
-          // tatsächlich betreten, auch wenn sie den Kampf gewinnen — Angriff ja, Einzug nein.
-          canEnter = res.entered && terrainAllowed(destTile, selectedUnit);
-          if(canEnter){
-            if(((destTile.type===T_CITY && !destTile.ruined) || destTile.type===T_AIRPORT || destTile.type===T_RADAR) && destTile.owner!==selectedUnit.owner && stats.subclass==='land'){
-              if(destTile.type===T_CITY) captureCity(x,y, selectedUnit.owner, selectedUnit);
-              else destTile.owner = selectedUnit.owner;
-            }
-            updateInfoPanel('Gegner besiegt, Feld eingenommen!');
+          if(res.captured){
+            const label = destTile.type===T_AIRPORT ? 'Flughafen' : destTile.type===T_RADAR ? 'Radarstation' : destTile.fortressLevel ? 'Festung' : 'Stadt';
+            updateInfoPanel(`${label} erobert!`);
           } else {
             updateInfoPanel('Gegner besiegt — Einheit bleibt auf ihrem Feld.');
           }
@@ -2257,6 +2374,31 @@ function handleGameClick(sx, sy){
         // der Kampfsequenz — sonst stünde die Einheit optisch schon im eroberten Feld,
         // während der Ausgang (Blinken) noch offen ist.
         playCombatSequence(attackerSnap, defenderSnap, () => {
+          if(res.entered && units.includes(finishedUnit)){
+            finishedUnit.x = x; finishedUnit.y = y;
+            queueMoveAnim(finishedUnit, animFromX, animFromY);
+          }
+          finishUnitTurnAfterAnim(finishedUnit);
+        });
+        return;
+      }
+      const def = pickDefenderAt(x,y,selectedUnit);
+      if(def){
+        const attackerSnap = snapshotUnit(selectedUnit);
+        const defenderSnap = snapshotUnit(def.target);
+        const res = resolveMeleeAttack(selectedUnit, def.target, def.noEntry);
+        let canEnter = false;
+        if(res.winner==='attacker'){
+          // Landeinheiten dürfen Wassereinheiten (und umgekehrt Schiffe Landfelder) nie
+          // tatsächlich betreten, auch wenn sie den Kampf gewinnen — Angriff ja, Einzug nein.
+          canEnter = res.entered && terrainAllowed(destTile, selectedUnit);
+          updateInfoPanel(canEnter ? 'Gegner besiegt, Feld eingenommen!' : 'Gegner besiegt — Einheit bleibt auf ihrem Feld.');
+          if(units.includes(selectedUnit)){ selectedUnit.moved = true; selectedUnit.movesLeft = 0; selectedUnit.actedAtAll = true; }
+        } else {
+          updateInfoPanel('Eigene Einheit im Kampf verloren!');
+        }
+        const finishedUnit = selectedUnit;
+        playCombatSequence(attackerSnap, defenderSnap, () => {
           if(canEnter && units.includes(finishedUnit)){
             finishedUnit.x = x; finishedUnit.y = y;
             queueMoveAnim(finishedUnit, animFromX, animFromY);
@@ -2265,40 +2407,6 @@ function handleGameClick(sx, sy){
         });
         return;
       }
-      // Unbesetzte gegnerische/neutrale Stadt oder Flughafen: Städte verteidigen sich wie
-      // eine Infanterie-Einheit (natürliche Verteidigung) — das ist ein echter Kampf und
-      // bekommt daher dieselbe Blink+Sound-Sequenz wie ein Kampf gegen eine Einheit.
-      const attackerSnap = snapshotUnit(selectedUnit);
-      const cityOwnerBefore = map[y][x].owner;
-      const wasAirport = map[y][x].type===T_AIRPORT || map[y][x].type===T_RADAR;
-      const defenderSnap = { x, y, type:'infantry', owner: cityOwnerBefore };
-      const survived = tryCaptureStructure(selectedUnit, x, y);
-      const capturedType = map[y][x].type;
-      if(survived){
-        updateInfoPanel(capturedType===T_AIRPORT ? 'Flughafen erobert!' : (capturedType===T_RADAR ? 'Radarstation erobert!' : 'Stadt erobert!'));
-      } else {
-        updateInfoPanel('Angriff auf die Stadtverteidigung gescheitert — Einheit verloren!');
-      }
-      if(units.includes(selectedUnit)){ selectedUnit.moved = true; selectedUnit.movesLeft = 0; selectedUnit.actedAtAll = true; }
-      const finishedUnit = selectedUnit;
-      const enterField = () => {
-        if(!survived || !units.includes(finishedUnit)) return;
-        finishedUnit.x = x; finishedUnit.y = y;
-        queueMoveAnim(finishedUnit, animFromX, animFromY);
-      };
-      if(wasAirport){
-        // Flughäfen haben keine eigene Verteidigung — kein Kampf, die Bewegung darf sofort
-        // gezeigt werden.
-        enterField();
-        finishUnitTurnAfterAnim(finishedUnit);
-      } else {
-        // Auch hier: erst blinken/kämpfen lassen, danach erst der sichtbare Einzug.
-        playCombatSequence(attackerSnap, defenderSnap, () => {
-          enterField();
-          finishUnitTurnAfterAnim(finishedUnit);
-        });
-      }
-      return;
     }
 
     // Bewegen (inkl. Laden auf Schiff/Träger) — verbraucht nur die tatsächlichen
@@ -2328,25 +2436,26 @@ function handleGameClick(sx, sy){
         updateInfoPanel(`${stats.name} an Bord von ${UNIT_STATS[hostAtDest.type].name} geladen.`);
       } else {
         const destTile = map[y][x];
-        if(destTile.type===T_CITY && !destTile.ruined && destTile.owner!==selectedUnit.owner && stats.subclass==='land'){
-          // Auch beim Reinlaufen in eine unbesetzte Stadt kämpft die Einheit gegen deren
-          // Grundverteidigung — das soll genauso wie ein echter Kampf sichtbar sein. Die
-          // Einheit betritt die Stadt daher (wie bei echtem Kampf) erst NACH dem Ausgang,
-          // damit sie nicht schon während der Blink-Sequenz dort steht.
+        // Städte UND Festungen haben eine eigene (virtuelle) Verteidigung — das soll genauso
+        // wie ein echter Kampf sichtbar sein. Die Einheit betritt das Feld daher erst NACH
+        // dem Blink-Ausgang, damit sie nicht schon währenddessen optisch dort steht.
+        const isCombatStructure = ((destTile.type===T_CITY && !destTile.ruined) || destTile.fortressLevel>0) && destTile.owner!==selectedUnit.owner;
+        if(isCombatStructure && stats.subclass==='land'){
           const attackerSnap = snapshotUnit(selectedUnit); // noch an der alten Position
-          const defenderSnap = { x, y, type:'infantry', owner: destTile.owner };
-          const survived = tryCaptureStructure(selectedUnit, x, y);
+          const virtualType = (destTile.fortressLevel===2 || destTile.cityDefenseLevel) ? 'tank' : 'infantry';
+          const defenderSnap = { x, y, type:virtualType, owner: destTile.owner };
+          const res = resolveStructureAttack(selectedUnit, x, y);
           // Positionswechsel bewusst NICHT hier, sondern erst im finish()-Callback nach der
           // Kampfsequenz (siehe unten) — sonst stünde die Einheit optisch schon in der Stadt.
-          updateInfoPanel(survived ? 'Stadt erobert!' : 'Angriff auf die Stadtverteidigung gescheitert — Einheit verloren!');
-          cityCombat = { attackerSnap, defenderSnap, survived };
+          updateInfoPanel(res.captured ? (destTile.fortressLevel ? 'Festung erobert!' : 'Stadt erobert!') : 'Angriff auf die Stadtverteidigung gescheitert — Einheit verloren!');
+          cityCombat = { attackerSnap, defenderSnap, survived: res.winner==='attacker' };
           deferMoveAnim = true;
         } else {
           selectedUnit.x = x; selectedUnit.y = y;
-          const isUnclaimedStructure = ((destTile.type===T_CITY && !destTile.ruined) || destTile.type===T_AIRPORT || destTile.type===T_RADAR) && destTile.owner!==selectedUnit.owner;
+          const isUnclaimedStructure = (destTile.type===T_AIRPORT || destTile.type===T_RADAR) && destTile.owner!==selectedUnit.owner;
           if(isUnclaimedStructure){
             if(stats.subclass==='land'){
-              tryCaptureStructure(selectedUnit, x, y);
+              resolveStructureAttack(selectedUnit, x, y);
               updateInfoPanel(destTile.type===T_RADAR ? 'Radarstation erobert!' : 'Flughafen erobert!');
             } else {
               updateInfoPanel('Angelegt – nur Landeinheiten erobern Städte.');
@@ -3192,26 +3301,24 @@ function aiActUnit(unit){
 
   const adj = adjacentTiles(unit.x,unit.y);
   for(const a of adj){
+    const tile = map[a.y][a.x];
+    if(isCapturableStructureTile(tile) && tile.owner!==unit.owner){
+      const res = resolveStructureAttack(unit, a.x, a.y);
+      MusicEngine.start();
+      if(res.entered) { unit.x=a.x; unit.y=a.y; }
+      unit.moved = true; unit.movesLeft = 0;
+      queueMoveAnim(unit, animFromX, animFromY);
+      return;
+    }
     const def = pickDefenderAt(a.x,a.y,unit);
     if(def && def.target.owner!==unit.owner){
       const res = resolveMeleeAttack(unit, def.target, def.noEntry);
       MusicEngine.start();
       if(res.winner==='attacker' && res.entered && terrainAllowed(map[a.y][a.x], unit)){
         unit.x=a.x; unit.y=a.y;
-        const t=map[a.y][a.x];
-        if(((t.type===T_CITY && !t.ruined) || t.type===T_AIRPORT || t.type===T_RADAR) && t.owner!==unit.owner && stats.subclass==='land'){
-          if(t.type===T_CITY) captureCity(a.x,a.y,unit.owner,unit); else t.owner = unit.owner;
-        }
       }
       unit.moved = true; unit.movesLeft = 0;
       queueMoveAnim(unit, animFromX, animFromY);
-      return;
-    }
-    const tile = map[a.y][a.x];
-    if(unitsAt(a.x,a.y).length===0 && (tile.type===T_CITY || tile.type===T_AIRPORT || tile.type===T_RADAR) && tile.owner!==unit.owner && stats.subclass==='land'){
-      const survived = tryCaptureStructure(unit, a.x, a.y);
-      if(survived){ unit.x=a.x; unit.y=a.y; }
-      if(units.includes(unit)){ unit.moved = true; unit.movesLeft = 0; queueMoveAnim(unit, animFromX, animFromY); }
       return;
     }
   }
@@ -3222,6 +3329,15 @@ function aiActUnit(unit){
   for(let i=0;i<path.length;i++){
     const step = path[i];
     const isLast = i===path.length-1;
+    const stepTile = map[step.y][step.x];
+    if(isLast && isCapturableStructureTile(stepTile) && stepTile.owner!==unit.owner){
+      const res = resolveStructureAttack(unit, step.x, step.y);
+      MusicEngine.start();
+      if(res.entered){ unit.x=step.x; unit.y=step.y; }
+      unit.moved = true; unit.movesLeft = 0;
+      queueMoveAnim(unit, animFromX, animFromY);
+      return;
+    }
     const def = isLast ? pickDefenderAt(step.x, step.y, unit) : null;
     if(def){
       if(def.target.owner!==unit.owner){
@@ -3229,10 +3345,6 @@ function aiActUnit(unit){
         MusicEngine.start();
         if(res.winner==='attacker' && res.entered && terrainAllowed(map[step.y][step.x], unit)){
           unit.x=step.x; unit.y=step.y;
-          const t=map[step.y][step.x];
-          if(((t.type===T_CITY && !t.ruined) || t.type===T_AIRPORT || t.type===T_RADAR) && t.owner!==unit.owner && stats.subclass==='land'){
-            if(t.type===T_CITY) captureCity(step.x, step.y, unit.owner, unit); else t.owner = unit.owner;
-          }
         }
       }
       unit.moved = true; unit.movesLeft = 0;
@@ -3245,8 +3357,9 @@ function aiActUnit(unit){
     unit.x = step.x; unit.y = step.y;
     refuelIfOnOwnCity(unit);
     const t = map[step.y][step.x];
-    if((t.type===T_CITY || t.type===T_AIRPORT || t.type===T_RADAR) && t.owner!==unit.owner && stats.subclass==='land'){
-      if(!tryCaptureStructure(unit, step.x, step.y)){ queueMoveAnim(unit, animFromX, animFromY); return; }
+    if(isCapturableStructureTile(t) && t.owner!==unit.owner && stats.subclass==='land'){
+      const res = resolveStructureAttack(unit, step.x, step.y);
+      if(res.winner==='defender'){ queueMoveAnim(unit, animFromX, animFromY); return; }
     }
   }
   unit.movesLeft = remaining;
@@ -4563,6 +4676,9 @@ function serializeTile(t){
   if(t.specialization) c.specialization = t.specialization;
   if(t.pendingSpecialization) c.pendingSpecialization = t.pendingSpecialization;
   if(t.specializationTimer) c.specializationTimer = t.specializationTimer;
+  if(t.fortressLevel) c.fortressLevel = t.fortressLevel;
+  if(t.cityDefenseLevel) c.cityDefenseLevel = t.cityDefenseLevel;
+  if(t.founded) c.founded = true;
   return c;
 }
 
