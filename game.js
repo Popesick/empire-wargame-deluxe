@@ -182,6 +182,7 @@ let unloadingCargoUnit = null;
 let gameOver = false;
 let coalitionAgainst = null; // Enhanced: owner-id, gegen den sich alle anderen verbünden
 let lastStandActive = false; // Enhanced: ab 80% Städtekontrolle einer Partei aktiv
+let lastStandOwner = null; // die dominante Partei selbst profitiert NICHT vom Last-Stand-Bonus
 let selectedBuildCity = null;
 let awaitingWaypointClick = false;
 let awaitingPatrolStep = 0; // 0=inaktiv, 1=wartet auf Punkt A, 2=wartet auf Punkt B
@@ -2520,11 +2521,12 @@ function processCityProduction(owner){
     for(let x=0;x<COLS;x++){
       const tile = map[y][x];
       if(tile.type===T_CITY && tile.owner===owner){
-        // "Last Stand" (Enhanced, ab 80% Städtekontrolle einer Partei): JEDE Stadt jeder
-        // Partei spawnt zusätzlich zur normalen Produktion eine Infanterie-Einheit pro
-        // Runde — unabhängig von Bauwarteschlange/Umbau, damit sich alle Seiten in der
-        // Endphase noch wehren können.
-        if(isEnhanced() && lastStandActive){
+        // "Last Stand" (Enhanced, ab 80% Städtekontrolle einer Partei): jede Stadt JEDER
+        // UNTERLEGENEN Partei spawnt zusätzlich zur normalen Produktion eine Infanterie-
+        // Einheit pro Runde — unabhängig von Bauwarteschlange/Umbau, damit sich die
+        // Unterlegenen in der Endphase noch wehren können. Die dominante Partei selbst
+        // bekommt den Bonus nicht, sonst würde die Regel ihren Vorsprung nur vergrößern.
+        if(isEnhanced() && lastStandActive && owner !== lastStandOwner){
           spawnUnit(owner, 'infantry', x, y);
         }
         // Stadt-Umbau (Enhanced): läuft ein Spezialisierungswechsel, ruht die Produktion
@@ -2752,16 +2754,18 @@ function totalCapturableCities(){
 // Städte pro Aufruf zweimal zu zählen:
 // - 70%-Bündnis-Regel: kontrolliert eine Partei 70%+ aller (nicht zerstörten) Städte,
 //   verbünden sich automatisch alle anderen aktiven Parteien gegen sie.
-// - 80%-"Last Stand"-Regel: ab 80% Kontrolle spawnt JEDE Partei zusätzlich zur normalen
-//   Produktion eine Infanterie pro Stadt und Runde (siehe processCityProduction).
+// - 80%-"Last Stand"-Regel: ab 80% Kontrolle einer Partei spawnt JEDE ANDERE (unterlegene)
+//   Partei zusätzlich zur normalen Produktion eine Infanterie pro Stadt und Runde — die
+//   dominante Partei selbst bekommt den Bonus nicht (siehe processCityProduction).
 // Beide sind dynamisch: werden bei jedem Rundenwechsel neu bewertet und lösen sich auf,
 // sobald der Anteil (z.B. durch Rückeroberung) wieder darunter fällt.
 function updateDominanceState(){
-  if(!isEnhanced()){ coalitionAgainst = null; lastStandActive = false; return; }
+  if(!isEnhanced()){ coalitionAgainst = null; lastStandActive = false; lastStandOwner = null; return; }
   const { counts, total } = countCitiesByOwner();
-  if(total===0){ coalitionAgainst = null; lastStandActive = false; return; }
+  if(total===0){ coalitionAgainst = null; lastStandActive = false; lastStandOwner = null; return; }
   coalitionAgainst = activeOwners().find(o => (counts[o]||0) / total >= 0.70) || null;
-  lastStandActive = activeOwners().some(o => (counts[o]||0) / total >= 0.80);
+  lastStandOwner = activeOwners().find(o => (counts[o]||0) / total >= 0.80) || null;
+  lastStandActive = lastStandOwner !== null;
 }
 
 // Neutrale Städte haben keine eigene Partei und stehen daher nie im Bündnis.
@@ -3181,7 +3185,7 @@ function updateHud(){
   if(lastStandActive){
     const banner = document.createElement('div');
     banner.className = 'coalition-banner laststand-banner';
-    banner.textContent = '🪖 Last Stand — alle Städte bauen zusätzlich Infanterie';
+    banner.textContent = `🪖 Last Stand — alle außer ${lastStandOwner===OWNER_PLAYER ? 'dir' : ownerLabel(lastStandOwner)} bauen zusätzlich Infanterie`;
     ownerPanel.appendChild(banner);
   }
   for(const o of activeOwners()){
@@ -4091,6 +4095,7 @@ function initGame(){
   minimapTerrainCanvas = null;
   coalitionAgainst = null;
   lastStandActive = false;
+  lastStandOwner = null;
   radarPositions = [];
   closeBuildPanel();
   document.getElementById('unit-info-panel').classList.add('hidden');
