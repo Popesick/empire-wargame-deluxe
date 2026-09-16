@@ -3176,16 +3176,12 @@ function updateHud(){
     `Runde ${turnNumber} — ${currentTurnOwner===OWNER_PLAYER ? 'Dein Zug' : ownerLabel(currentTurnOwner)+' zieht...'}`;
   const ownerPanel = document.getElementById('owner-panel');
   ownerPanel.innerHTML = '';
-  if(coalitionAgainst){
+  if(coalitionAgainst || lastStandActive){
     const banner = document.createElement('div');
     banner.className = 'coalition-banner';
-    banner.textContent = `⚔ Bündnis gegen ${coalitionAgainst===OWNER_PLAYER ? 'dich' : ownerLabel(coalitionAgainst)}`;
-    ownerPanel.appendChild(banner);
-  }
-  if(lastStandActive){
-    const banner = document.createElement('div');
-    banner.className = 'coalition-banner laststand-banner';
-    banner.textContent = `🪖 Last Stand — alle außer ${lastStandOwner===OWNER_PLAYER ? 'dir' : ownerLabel(lastStandOwner)} bauen zusätzlich Infanterie`;
+    let text = coalitionAgainst ? `⚔ Bündnis gegen ${coalitionAgainst===OWNER_PLAYER ? 'dich' : ownerLabel(coalitionAgainst)}` : '';
+    if(lastStandActive) text += (text ? ' · ' : '') + '🪖 Last Stand';
+    banner.textContent = text;
     ownerPanel.appendChild(banner);
   }
   for(const o of activeOwners()){

@@ -329,10 +329,6 @@ html,body{
   margin-bottom:2px;
 }
 
-.laststand-banner{
-  color:var(--gold);
-}
-
 .owner-name{
   font-weight:bold;
   min-width:2.6em;
