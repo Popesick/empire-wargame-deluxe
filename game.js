@@ -196,6 +196,7 @@ let coalitionAgainst = null; // Enhanced: owner-id, gegen den sich alle anderen 
 let lastStandActive = false; // Enhanced: ab 80% Städtekontrolle einer Partei aktiv
 let lastStandOwner = null; // die dominante Partei selbst profitiert NICHT vom Last-Stand-Bonus
 let rallyCityByOwner = {}; // KI-Schwierigkeit medium+: owner -> {x,y} der gewählten Sammelstadt
+let invasionFleetByOwner = {}; // KI-Schwierigkeit hard: owner -> Array gehaltener Transporter-IDs für den Großangriff
 let selectedBuildCity = null;
 let awaitingWaypointClick = false;
 let awaitingPatrolStep = 0; // 0=inaktiv, 1=wartet auf Punkt A, 2=wartet auf Punkt B
@@ -2492,7 +2493,7 @@ function buildUnitInfoTable(){
 }
 
 /* ---------- STÄDTE: PRODUKTION ---------- */
-function pickAiBuildType(coastal){
+function pickAiBuildType(coastal, tile){
   const t = turnNumber;
   let weights;
   // KI-Schwierigkeit medium+: früher auf Panzer/Artillerie statt überwiegend Infanterie setzen.
@@ -2505,6 +2506,14 @@ function pickAiBuildType(coastal){
   // Enhanced: KI baut auch Ingenieure, damit sie Straßen/Eisenbahn/Festungen/Radar
   // tatsächlich einsetzt — moderates Gewicht, kein Kampfwert also nicht zu viele davon.
   if(isEnhanced()) weights = Object.assign({}, weights, { engineer: t < 6 ? 0.1 : 0.12 });
+  // KI-Schwierigkeit hard (Enhanced): eine spezialisierte Stadt baut nur noch passende
+  // Einheiten — Ingenieure bleiben als neutraler Nutztyp erlaubt, sonst könnte die KI z.B.
+  // nie wieder ein Radar bauen, sobald jede Stadt spezialisiert ist.
+  if(isEnhanced() && difficultyAtLeast('hard') && tile && tile.specialization){
+    const allowed = new Set(CITY_SPECIALIZATIONS[tile.specialization].types);
+    allowed.add('engineer');
+    for(const type of Object.keys(weights)) if(!allowed.has(type)) weights[type] = 0;
+  }
   const order = buildOrderFor();
   const total = order.reduce((a,type)=>a+(weights[type]||0), 0);
   const r = Math.random() * total;
@@ -2521,12 +2530,20 @@ function pickAiBuildType(coastal){
 // Bewusst simpel gehalten (kleine Zufallschance pro Stadt und Runde) statt eine explizite
 // "Stadt X Runden im Besitz"-Verfolgung einzuführen.
 function aiConsiderCitySpecialization(owner){
+  const rally = rallyCityByOwner[owner];
   for(const c of citiesOf(owner)){
     const tile = map[c.y][c.x];
     if(tile.ruined || tile.specialization || tile.specializationTimer>0) continue;
     if(Math.random() > 0.06) continue;
     const coastal = isCoastal(c.x,c.y);
-    const choices = coastal ? ['arms','airbase','harbor'] : ['arms','airbase'];
+    let choices = coastal ? ['arms','airbase','harbor'] : ['arms','airbase'];
+    // KI-Schwierigkeit hard: Städte in der Nähe der Sammelstadt bevorzugt zu
+    // Rüstungsindustrie machen, damit die Sammelstadt gezielt mit frischen Truppen
+    // versorgt wird (stark gewichtet, aber nicht exklusiv — Vielfalt bleibt möglich).
+    if(difficultyAtLeast('hard') && rally && !(c.x===rally.x && c.y===rally.y) &&
+       Math.abs(c.x-rally.x)+Math.abs(c.y-rally.y) <= 5){
+      choices = ['arms','arms','arms', ...choices];
+    }
     tile.pendingSpecialization = choices[Math.floor(Math.random()*choices.length)];
     tile.specializationTimer = 10;
   }
@@ -2567,7 +2584,7 @@ function processCityProduction(owner){
           // Städte fassen beliebig viele Einheiten — neue Einheiten spawnen direkt dort.
           const spawned = spawnUnit(owner, type, x, y);
           tile.buildPoints -= cost;
-          if(owner!==OWNER_PLAYER) tile.buildType = pickAiBuildType(isCoastal(x,y));
+          if(owner!==OWNER_PLAYER) tile.buildType = pickAiBuildType(isCoastal(x,y), tile);
           if(tile.rallyPoint && !(tile.rallyPoint.x===x && tile.rallyPoint.y===y)){
             setDestination(spawned, tile.rallyPoint.x, tile.rallyPoint.y, true, true);
           }
@@ -2834,10 +2851,60 @@ function ensureRallyCity(owner){
   }
 }
 
+// KI-Schwierigkeit hard: statt Transporter/Eskorte einzeln loszuschicken, sammelt die KI
+// beladene Transporter an der Sammelstadt (mindestens 5), bevor sie zusammen mit
+// verfügbarer Eskorte (Helikopter/Zerstörer/Schlachtschiff) auf ein gemeinsames Ziel
+// losgeschickt werden — kein neuer Bewegungsmechanismus, nur ein gemeinsames setDestination
+// statt je eigener Zielsuche (siehe die destination-Prüfung am Anfang von aiActUnit/
+// aiActShipWithCargo/aiActShipPickup, die das Marschziel danach respektiert).
+function aiConsiderInvasion(owner){
+  if(!invasionFleetByOwner[owner]) invasionFleetByOwner[owner] = [];
+  invasionFleetByOwner[owner] = invasionFleetByOwner[owner].filter(id => {
+    const u = units.find(x=>x.id===id);
+    return u && u.hp>0 && !u.hostId && u.type==='transport' && u.cargo.length>0;
+  });
+
+  const targets = hostileTargetsFor(owner);
+  if(targets.length===0) return;
+
+  const rally = rallyCityByOwner[owner];
+  const nearRally = (u) => !rally || (Math.abs(u.x-rally.x)+Math.abs(u.y-rally.y) <= 6);
+
+  const fleetIds = new Set(invasionFleetByOwner[owner]);
+  for(const u of unitsOf(owner)){
+    if(u.type==='transport' && u.cargo.length>0 && !u.moved && !u.destination && nearRally(u)) fleetIds.add(u.id);
+  }
+  const committedTransports = [...fleetIds].map(id=>units.find(u=>u.id===id)).filter(Boolean);
+
+  if(committedTransports.length < 5){
+    invasionFleetByOwner[owner] = committedTransports.map(u=>u.id);
+    // Gesammelte Transporter halten, statt sie einzeln (über aiActShipWithCargo) losfahren
+    // zu lassen, bis genug für den Großangriff beisammen sind.
+    for(const u of committedTransports){ u.moved = true; u.movesLeft = 0; }
+    return;
+  }
+
+  invasionFleetByOwner[owner] = [];
+  let best=null, bestDist=Infinity;
+  const from = rally || committedTransports[0];
+  for(const t of targets){
+    const d = Math.abs(t.x-from.x)+Math.abs(t.y-from.y);
+    if(d<bestDist){ bestDist=d; best=t; }
+  }
+  const waterNearTarget = adjacentTiles(best.x,best.y).find(a=>map[a.y][a.x].type===T_WATER) || best;
+  const escorts = unitsOf(owner).filter(u =>
+    (u.type==='helicopter' || u.type==='destroyer' || u.type==='battleship') && !u.moved && nearRally(u));
+  for(const u of [...committedTransports, ...escorts]){
+    u.moved = false;
+    setDestination(u, waterNearTarget.x, waterNearTarget.y, true);
+  }
+}
+
 function runAiOwnerTurn(owner){
   if(gameOver) return;
   processOrderStates(owner);
   if(difficultyAtLeast('medium')) ensureRallyCity(owner);
+  if(difficultyAtLeast('hard')) aiConsiderInvasion(owner);
 
   const myUnits = () => unitsOf(owner).filter(u=>u.hp>0 && !u.moved);
   for(const u of myUnits()){
@@ -2870,6 +2937,16 @@ function runAiOwnerTurn(owner){
 function aiActUnit(unit){
   const stats = UNIT_STATS[unit.type];
   const animFromX = unit.x, animFromY = unit.y;
+
+  // KI-Schwierigkeit medium+: eine Einheit mit gesetztem Marschziel (Sammelstadt-Rallypoint
+  // beim Spawn, siehe processCityProduction, oder ein koordinierter Großangriff, siehe
+  // aiConsiderInvasion) folgt diesem Ziel über advanceWaypoint statt eigenständig das
+  // nächste Ziel zu suchen — sonst würde diese Funktion den Marschbefehl sofort überschreiben,
+  // da sie vor advanceWaypoint im Zugablauf läuft (siehe runAiOwnerTurn).
+  if(difficultyAtLeast('medium') && unit.destination){
+    advanceWaypoint(unit);
+    return;
+  }
 
   // KI-Schwierigkeit medium+: eine angeschlagene Einheit, die nicht gerade im Nahkampf
   // steht, zieht sich zur nächsten eigenen Stadt zurück und rastet dort (orderState=
@@ -2911,11 +2988,87 @@ function aiActUnit(unit){
     }
   }
 
+  // KI-Schwierigkeit hard: ein Jäger mit wenig Sprit fliegt rechtzeitig zur nächsten
+  // eigenen Stadt/zum Flughafen zurück, statt weiter Ziele zu suchen und später mitten in
+  // der Luft den Sprit zu verlieren (siehe processFuel für den passiven Verbrauch/Absturz).
+  if(difficultyAtLeast('hard') && unit.type==='fighter' && !unit.hostId && unit.fuel < UNIT_STATS.fighter.fuel*0.5){
+    let nearestBase=null, bestBaseD=Infinity;
+    for(let y=0;y<ROWS;y++){
+      for(let x=0;x<COLS;x++){
+        const t = map[y][x];
+        if((t.type===T_CITY || t.type===T_AIRPORT) && t.owner===unit.owner){
+          const d = Math.abs(x-unit.x)+Math.abs(y-unit.y);
+          if(d<bestBaseD){ bestBaseD=d; nearestBase={x,y}; }
+        }
+      }
+    }
+    if(nearestBase){
+      const path = computePathTowards(unit, nearestBase);
+      if(path && path.length>0){
+        let remaining = unit.movesLeft;
+        for(const step of path){
+          const cost = terrainCost(map[step.y][step.x], unit);
+          if(cost>remaining) break;
+          remaining -= cost;
+          unit.x = step.x; unit.y = step.y;
+        }
+        unit.movesLeft = remaining;
+        unit.moved = true;
+        unit.actedAtAll = true;
+        refuelIfOnOwnCity(unit);
+        queueMoveAnim(unit, animFromX, animFromY);
+        return;
+      }
+    }
+  }
+
   let targets = hostileTargetsFor(unit.owner);
-  if(targets.length===0) return;
+  if(targets.length===0){
+    // KI-Schwierigkeit hard: keine bekannten Ziele — schnelle Einheiten (Helikopter/Jäger)
+    // erkunden aktiv unerkundetes Gebiet, statt untätig stehenzubleiben.
+    if(difficultyAtLeast('hard') && fogEnabled && (unit.type==='helicopter' || unit.type==='fighter')){
+      let dest=null, bestD=Infinity;
+      for(let y=0;y<ROWS;y++){
+        for(let x=0;x<COLS;x++){
+          if(exploredSet.has(key(x,y))) continue;
+          const d = Math.abs(x-unit.x)+Math.abs(y-unit.y);
+          if(d<bestD){ bestD=d; dest={x,y}; }
+        }
+      }
+      if(dest){
+        const path = computePathTowards(unit, dest);
+        if(path && path.length>0){
+          let remaining = unit.movesLeft;
+          for(const step of path){
+            const cost = terrainCost(map[step.y][step.x], unit);
+            if(cost>remaining) break;
+            remaining -= cost;
+            unit.x = step.x; unit.y = step.y;
+          }
+          unit.movesLeft = remaining;
+          unit.moved = true;
+          unit.actedAtAll = true;
+          refuelIfOnOwnCity(unit);
+          queueMoveAnim(unit, animFromX, animFromY);
+        }
+      }
+    }
+    return;
+  }
 
   if(stats.subclass==='land'){
     const myLm = (landmassId[unit.y] && landmassId[unit.y][unit.x]!==undefined) ? landmassId[unit.y][unit.x] : -1;
+    // KI-Schwierigkeit hard: wird eine eigene Stadt auf einer ANDEREN Landmasse akut bedroht
+    // und steht diese Einheit nicht selbst gerade im Nahkampf, hilft sie per Transporter aus,
+    // statt lokal weiterzukämpfen, obwohl die eigene Insel keine akute Gefahr hat.
+    if(difficultyAtLeast('hard') && !adjacentTiles(unit.x,unit.y).some(a=>pickDefenderAt(a.x,a.y,unit))){
+      const threatened = citiesOf(unit.owner).some(c => {
+        const clm = (landmassId[c.y] && landmassId[c.y][c.x]!==undefined) ? landmassId[c.y][c.x] : -1;
+        if(clm===myLm) return false;
+        return enemyWithinRadius({x:c.x,y:c.y,owner:unit.owner}, SIGHT_RANGE.ground+2);
+      });
+      if(threatened){ aiSeekTransport(unit, myLm); return; }
+    }
     const sameIsland = targets.filter(t => landmassId[t.y] && landmassId[t.y][t.x]===myLm);
     if(sameIsland.length>0) targets = sameIsland;
     else { aiSeekTransport(unit, myLm); return; }
@@ -3062,14 +3215,41 @@ function aiActEngineer(unit){
   }
 
   if(fogEnabled && !ownerHasRadar(owner)){
-    const capital = citiesOf(owner).find(c=>map[c.y][c.x].capital) || citiesOf(owner)[0];
-    if(capital){
-      if(Math.abs(unit.x-capital.x)+Math.abs(unit.y-capital.y)<=2 && [T_PLAIN,T_FOREST,T_HILLS,T_MOUNTAIN].includes(tile.type)){
-        startEngineerBuild(unit, 'radar', 5);
+    // KI-Schwierigkeit hard: taktische Platzierung — die Kachel mit dem größten NEUEN
+    // Sichtgewinn (meiste noch unerkundete Nachbarn im RADAR_SIGHT_RANGE-Radius), bevorzugt
+    // an der Front zu unerkundetem Gebiet, statt immer nahe der Hauptstadt.
+    if(difficultyAtLeast('hard')){
+      const myLm = (landmassId[unit.y] && landmassId[unit.y][unit.x]!==undefined) ? landmassId[unit.y][unit.x] : -1;
+      let bestSpot=null, bestGain=-1;
+      for(let y=0;y<ROWS;y++){
+        for(let x=0;x<COLS;x++){
+          const t = map[y][x];
+          if(!([T_PLAIN,T_FOREST,T_HILLS,T_MOUNTAIN].includes(t.type)) || t.fortress) continue;
+          // Nur Kacheln auf der eigenen Landmasse — sonst könnte der beste Sichtgewinn auf
+          // einer für den Ingenieur unerreichbaren Insel liegen (kein Landweg dorthin).
+          if(landmassId[y][x]!==myLm) continue;
+          const gain = tilesInRadius(x,y,RADAR_SIGHT_RANGE).filter(([nx,ny])=>!exploredSet.has(key(nx,ny))).length;
+          if(gain>bestGain){ bestGain=gain; bestSpot={x,y}; }
+        }
+      }
+      if(bestSpot){
+        if(unit.x===bestSpot.x && unit.y===bestSpot.y){
+          startEngineerBuild(unit, 'radar', 5);
+          return;
+        }
+        aiEngineerMoveTowards(unit, bestSpot);
         return;
       }
-      aiEngineerMoveTowards(unit, capital);
-      return;
+    } else {
+      const capital = citiesOf(owner).find(c=>map[c.y][c.x].capital) || citiesOf(owner)[0];
+      if(capital){
+        if(Math.abs(unit.x-capital.x)+Math.abs(unit.y-capital.y)<=2 && [T_PLAIN,T_FOREST,T_HILLS,T_MOUNTAIN].includes(tile.type)){
+          startEngineerBuild(unit, 'radar', 5);
+          return;
+        }
+        aiEngineerMoveTowards(unit, capital);
+        return;
+      }
     }
   }
 
@@ -3078,18 +3258,32 @@ function aiActEngineer(unit){
     return;
   }
 
+  // KI-Schwierigkeit hard: gezielt Schiene zur Sammelstadt bauen (statt nur gelegentlich
+  // zufällig), damit frisch gebaute Truppen sie schnell erreichen — engineerTileCost erlaubt
+  // Schienenbau auch direkt auf unbefestigtem Gelände (teurer als ein Upgrade, aber möglich).
+  const rallyTarget = (difficultyAtLeast('hard') && rallyCityByOwner[owner] &&
+    !(unit.x===rallyCityByOwner[owner].x && unit.y===rallyCityByOwner[owner].y)) ? rallyCityByOwner[owner] : null;
+
   const myCities = citiesOf(owner);
-  let nearest=null, bestD=Infinity;
-  for(const c of myCities){
-    if(c.x===unit.x && c.y===unit.y) continue;
-    const d = Math.abs(c.x-unit.x)+Math.abs(c.y-unit.y);
-    if(d<bestD){ bestD=d; nearest=c; }
+  let nearest=rallyTarget, bestD=Infinity;
+  if(!nearest){
+    for(const c of myCities){
+      if(c.x===unit.x && c.y===unit.y) continue;
+      const d = Math.abs(c.x-unit.x)+Math.abs(c.y-unit.y);
+      if(d<bestD){ bestD=d; nearest=c; }
+    }
   }
   if(nearest){
     const path = computePathTowards(unit, nearest);
     if(path && path.length>0 && path.length<40){
-      const needsWork = path.some(p => !map[p.y][p.x].road && ![T_CITY,T_AIRPORT,T_RADAR].includes(map[p.y][p.x].type));
-      const kind = needsWork ? 'road' : (Math.random()<0.2 ? 'rail' : null);
+      let kind;
+      if(rallyTarget && nearest===rallyTarget){
+        const needsRail = path.some(p => !map[p.y][p.x].rail && ![T_CITY,T_AIRPORT,T_RADAR].includes(map[p.y][p.x].type));
+        kind = needsRail ? 'rail' : null;
+      } else {
+        const needsWork = path.some(p => !map[p.y][p.x].road && ![T_CITY,T_AIRPORT,T_RADAR].includes(map[p.y][p.x].type));
+        kind = needsWork ? 'road' : (Math.random()<0.2 ? 'rail' : null);
+      }
       if(kind){
         const fullPath = [{x:unit.x,y:unit.y}, ...path];
         const firstTile = map[fullPath[0].y][fullPath[0].x];
@@ -3144,6 +3338,12 @@ function aiSeekTransport(unit, myLm){
 // Schiff MIT Fracht: zur nächsten Wasserkachel neben feindlichem/neutralem Territorium
 // segeln und dort die erste Frachteinheit anlanden.
 function aiActShipWithCargo(ship){
+  // KI-Schwierigkeit medium+: siehe die gleiche Prüfung am Anfang von aiActUnit — ein Schiff
+  // mit gesetztem Marschziel folgt ihm, statt seine eigene unabhängige Zielsuche zu starten.
+  if(difficultyAtLeast('medium') && ship.destination){
+    advanceWaypoint(ship);
+    return;
+  }
   const cargoOwner = ship.owner;
   let best=null, bestDist=Infinity;
   for(let y=0;y<ROWS;y++){
@@ -3213,6 +3413,11 @@ function aiActShipWithCargo(ship){
 // Leeres Transportfähiges Schiff: eigene gestrandete Einheit an der Küste abholen,
 // sonst normal wie eine Kampfeinheit agieren.
 function aiActShipPickup(ship){
+  // KI-Schwierigkeit medium+: siehe die gleiche Prüfung am Anfang von aiActUnit.
+  if(difficultyAtLeast('medium') && ship.destination){
+    advanceWaypoint(ship);
+    return;
+  }
   const s = UNIT_STATS[ship.type];
   if(!s.canCarry || ship.cargo.length >= s.portageCapacity){ aiActUnit(ship); return; }
 
@@ -4229,6 +4434,7 @@ function initGame(){
   lastStandOwner = null;
   radarPositions = [];
   rallyCityByOwner = {};
+  invasionFleetByOwner = {};
   closeBuildPanel();
   document.getElementById('unit-info-panel').classList.add('hidden');
   document.getElementById('game-over').classList.add('hidden');
@@ -4365,6 +4571,7 @@ function loadGameFromSlot(slot){
   minimapTerrainCanvas = null;
   selectedBuildCity = null;
   rallyCityByOwner = {};
+  invasionFleetByOwner = {};
 
   document.getElementById('title-screen').classList.add('hidden');
   document.getElementById('setup-screen').classList.add('hidden');
