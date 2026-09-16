@@ -1971,6 +1971,68 @@ document.getElementById('minimap-toggle-btn').addEventListener('click', () => {
   document.getElementById('minimap-canvas').classList.toggle('hidden', !minimapVisible);
 });
 
+// Übersichts-Panel einklappen (nur der Kopf mit dem Ziehgriff bleibt sichtbar) — auf
+// kleinen Karten/Bildschirmen verdeckt das Panel sonst zu viel vom Spielfeld, gerade wenn
+// durch Bündnis-/Last-Stand-Banner mehr Zeilen dazukommen.
+const ownerPanelEl = document.getElementById('owner-panel');
+const ownerPanelCollapseBtn = document.getElementById('owner-panel-collapse-btn');
+function setOwnerPanelCollapsed(collapsed){
+  ownerPanelEl.classList.toggle('collapsed', collapsed);
+  ownerPanelCollapseBtn.textContent = collapsed ? '▢' : '─';
+  ownerPanelCollapseBtn.title = collapsed ? 'Ausklappen' : 'Einklappen';
+  localStorage.setItem('empire_ownerpanel_collapsed', collapsed ? '1' : '0');
+}
+ownerPanelCollapseBtn.addEventListener('click', () => setOwnerPanelCollapsed(!ownerPanelEl.classList.contains('collapsed')));
+setOwnerPanelCollapsed(localStorage.getItem('empire_ownerpanel_collapsed')==='1');
+
+// Verschiebbare HUD-Elemente (Übersichts-Panel per Ziehgriff, Minimap komplett): Position
+// wird relativ zu #map-wrap (dem gemeinsamen positionierten Elternelement) gehalten und in
+// localStorage gemerkt. `suppressClickAfterDrag` verhindert, dass ein Ziehen der Minimap
+// zusätzlich deren "Klicken zum Springen"-Handler auslöst.
+function makeDraggable(el, handle, storageKey, opts){
+  opts = opts || {};
+  const container = document.getElementById('map-wrap');
+  const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
+  if(saved){
+    el.style.left = saved.left+'px';
+    el.style.top = saved.top+'px';
+    el.style.right = 'auto';
+    el.style.bottom = 'auto';
+  }
+  let dragging = false, moved = false, startX = 0, startY = 0, origLeft = 0, origTop = 0;
+  handle.addEventListener('mousedown', (e) => {
+    dragging = true; moved = false;
+    const elRect = el.getBoundingClientRect();
+    const contRect = container.getBoundingClientRect();
+    origLeft = elRect.left - contRect.left;
+    origTop = elRect.top - contRect.top;
+    startX = e.clientX; startY = e.clientY;
+  });
+  window.addEventListener('mousemove', (e) => {
+    if(!dragging) return;
+    const dx = e.clientX-startX, dy = e.clientY-startY;
+    if(Math.abs(dx)>4 || Math.abs(dy)>4) moved = true;
+    if(!moved) return;
+    const contRect = container.getBoundingClientRect();
+    let nx = Math.max(0, Math.min(contRect.width-el.offsetWidth, origLeft+dx));
+    let ny = Math.max(0, Math.min(contRect.height-el.offsetHeight, origTop+dy));
+    el.style.left = nx+'px'; el.style.top = ny+'px';
+    el.style.right = 'auto'; el.style.bottom = 'auto';
+  });
+  window.addEventListener('mouseup', () => {
+    if(!dragging) return;
+    dragging = false;
+    if(moved) localStorage.setItem(storageKey, JSON.stringify({left:parseFloat(el.style.left), top:parseFloat(el.style.top)}));
+  });
+  if(opts.suppressClickAfterDrag){
+    el.addEventListener('click', (e) => {
+      if(moved){ e.stopImmediatePropagation(); e.preventDefault(); }
+    }, true);
+  }
+}
+makeDraggable(ownerPanelEl, document.getElementById('owner-panel-header'), 'empire_ownerpanel_pos');
+makeDraggable(minimapCanvas, minimapCanvas, 'empire_minimap_pos', { suppressClickAfterDrag: true });
+
 window.addEventListener('keydown', (evt) => {
   if(document.getElementById('game-screen').classList.contains('hidden')) return;
   if(inputLocked) return;
@@ -3531,7 +3593,7 @@ function endGame(won, text){
 function updateHud(){
   document.getElementById('turn-indicator').textContent =
     `Runde ${turnNumber} — ${currentTurnOwner===OWNER_PLAYER ? 'Dein Zug' : ownerLabel(currentTurnOwner)+' zieht...'}`;
-  const ownerPanel = document.getElementById('owner-panel');
+  const ownerPanel = document.getElementById('owner-panel-body');
   ownerPanel.innerHTML = '';
   if(coalitionAgainst || lastStandActive){
     const banner = document.createElement('div');

@@ -158,7 +158,13 @@
   <div id="map-wrap">
     <canvas id="game-canvas"></canvas>
     <canvas id="minimap-canvas" width="190" height="126" title="Klicken zum Springen"></canvas>
-    <div id="owner-panel"></div>
+    <div id="owner-panel">
+      <div id="owner-panel-header" title="Ziehen zum Verschieben">
+        <span>☰</span>
+        <button id="owner-panel-collapse-btn" title="Einklappen">─</button>
+      </div>
+      <div id="owner-panel-body"></div>
+    </div>
     <div id="unit-actions"></div>
 
     <div id="build-panel" class="hidden">
