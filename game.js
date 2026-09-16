@@ -156,8 +156,12 @@ const CITY_SPECIALIZATIONS = {
 };
 function effectiveBuildCost(tile, type){
   const base = UNIT_STATS[type].cost;
-  if(isEnhanced() && tile.specialization && CITY_SPECIALIZATIONS[tile.specialization].types.includes(type)){
-    return Math.max(1, Math.round(base * 0.8));
+  if(isEnhanced() && tile.specialization){
+    if(CITY_SPECIALIZATIONS[tile.specialization].types.includes(type)) return Math.max(1, Math.round(base * 0.8));
+    // KI-Schwierigkeit medium/hard: eine Stadt, die außerhalb ihrer Spezialisierung
+    // produziert, bekommt stattdessen einen Malus (20%/50%) statt nur den Bonus zu
+    // verpassen — gilt für jede Partei inkl. Spieler, nicht nur die KI.
+    if(difficultyAtLeast('medium')) return Math.max(1, Math.round(base * (difficultyAtLeast('hard') ? 1.5 : 1.2)));
   }
   return base;
 }
@@ -2491,7 +2495,10 @@ function buildUnitInfoTable(){
 function pickAiBuildType(coastal){
   const t = turnNumber;
   let weights;
-  if(t < 6) weights = { infantry:0.55, tank:0.25, artillery:0.2, destroyer:0, transport:0, battleship:0, carrier:0, submarine:0, helicopter:0, fighter:0 };
+  // KI-Schwierigkeit medium+: früher auf Panzer/Artillerie statt überwiegend Infanterie setzen.
+  if(t < 6) weights = difficultyAtLeast('medium')
+    ? { infantry:0.25, tank:0.4, artillery:0.35, destroyer:0, transport:0, battleship:0, carrier:0, submarine:0, helicopter:0, fighter:0 }
+    : { infantry:0.55, tank:0.25, artillery:0.2, destroyer:0, transport:0, battleship:0, carrier:0, submarine:0, helicopter:0, fighter:0 };
   else if(t < 14) weights = { infantry:0.28, tank:0.24, artillery:0.14, destroyer:0.08, transport:0.08, battleship:0.04, carrier:0.02, submarine:0.04, helicopter:0.06, fighter:0.02 };
   else weights = { infantry:0.16, tank:0.2, artillery:0.1, destroyer:0.08, transport:0.08, battleship:0.1, carrier:0.06, submarine:0.08, helicopter:0.08, fighter:0.06 };
   if(!coastal) weights = Object.assign({}, weights, { destroyer:0, transport:0, battleship:0, carrier:0, submarine:0 });
@@ -2798,9 +2805,39 @@ function hostileTargetsFor(owner){
   return targets;
 }
 
+// KI-Schwierigkeit medium+: bestimmt/bestätigt pro Zug eine "Sammelstadt" — die
+// küstennahe (Transporter müssen andocken können) Stadt der größten eigenen Landmasse,
+// Hauptstadt bevorzugt — und richtet alle ANDEREN eigenen Städte per rallyPoint darauf
+// aus. Kein neuer Marschmechanismus nötig: processCityProduction lässt frisch gebaute
+// Einheiten schon automatisch zu tile.rallyPoint marschieren (siehe dort).
+function ensureRallyCity(owner){
+  const cities = citiesOf(owner);
+  if(cities.length===0){ delete rallyCityByOwner[owner]; return; }
+  const byLandmass = new Map();
+  for(const c of cities){
+    const lm = (landmassId[c.y] && landmassId[c.y][c.x]!==undefined) ? landmassId[c.y][c.x] : -1;
+    if(!byLandmass.has(lm)) byLandmass.set(lm, []);
+    byLandmass.get(lm).push(c);
+  }
+  let bestGroup = null, bestScore = -1;
+  for(const group of byLandmass.values()){
+    const score = group.length + (group.some(c=>map[c.y][c.x].capital) ? 1000 : 0);
+    if(score > bestScore){ bestScore = score; bestGroup = group; }
+  }
+  const capital = bestGroup.find(c=>map[c.y][c.x].capital);
+  const coastal = bestGroup.filter(c=>isCoastal(c.x,c.y));
+  const rally = (capital && isCoastal(capital.x,capital.y)) ? capital : (coastal[0] || capital || bestGroup[0]);
+  rallyCityByOwner[owner] = {x:rally.x, y:rally.y};
+  for(const c of cities){
+    const tile = map[c.y][c.x];
+    tile.rallyPoint = (c.x===rally.x && c.y===rally.y) ? null : {x:rally.x, y:rally.y};
+  }
+}
+
 function runAiOwnerTurn(owner){
   if(gameOver) return;
   processOrderStates(owner);
+  if(difficultyAtLeast('medium')) ensureRallyCity(owner);
 
   const myUnits = () => unitsOf(owner).filter(u=>u.hp>0 && !u.moved);
   for(const u of myUnits()){
@@ -2833,6 +2870,47 @@ function runAiOwnerTurn(owner){
 function aiActUnit(unit){
   const stats = UNIT_STATS[unit.type];
   const animFromX = unit.x, animFromY = unit.y;
+
+  // KI-Schwierigkeit medium+: eine angeschlagene Einheit, die nicht gerade im Nahkampf
+  // steht, zieht sich zur nächsten eigenen Stadt zurück und rastet dort (orderState=
+  // 'resting' — derselbe Mechanismus wie bei rallypunkt-marschierten Einheiten: heilt
+  // vollständig, sobald sie untätig auf einer eigenen Stadt steht, siehe
+  // processEndOfTurnUnitState, und wacht bei voller HP oder Feindkontakt automatisch
+  // wieder auf, siehe processOrderStates).
+  if(difficultyAtLeast('medium') && isCrippled(unit) &&
+     !adjacentTiles(unit.x,unit.y).some(a=>pickDefenderAt(a.x,a.y,unit))){
+    const myCities = citiesOf(unit.owner);
+    let nearestCity=null, bestCityD=Infinity;
+    for(const c of myCities){
+      const d = Math.abs(c.x-unit.x)+Math.abs(c.y-unit.y);
+      if(d<bestCityD){ bestCityD=d; nearestCity=c; }
+    }
+    if(nearestCity){
+      if(unit.x===nearestCity.x && unit.y===nearestCity.y){
+        unit.orderState = 'resting';
+        unit.moved = true;
+        return;
+      }
+      const path = computePathTowards(unit, nearestCity);
+      if(path && path.length>0){
+        let remaining = unit.movesLeft;
+        for(const step of path){
+          if(pickDefenderAt(step.x, step.y, unit)) break;
+          const cost = terrainCost(map[step.y][step.x], unit);
+          if(cost>remaining) break;
+          remaining -= cost;
+          unit.x = step.x; unit.y = step.y;
+        }
+        unit.movesLeft = remaining;
+        unit.moved = true;
+        unit.actedAtAll = true;
+        if(unit.x===nearestCity.x && unit.y===nearestCity.y) unit.orderState = 'resting';
+        queueMoveAnim(unit, animFromX, animFromY);
+        return;
+      }
+    }
+  }
+
   let targets = hostileTargetsFor(unit.owner);
   if(targets.length===0) return;
 
@@ -2845,7 +2923,14 @@ function aiActUnit(unit){
 
   let best=null, bestDist=Infinity;
   for(const t of targets){
-    const d = Math.abs(t.x-unit.x)+Math.abs(t.y-unit.y);
+    let d = Math.abs(t.x-unit.x)+Math.abs(t.y-unit.y);
+    // KI-Schwierigkeit medium+: weiche Ziele (Transporter/Artillerie) bevorzugen — ein
+    // Distanz-Bonus statt einer harten Sortierung, damit ein direkt angrenzendes hartes
+    // Ziel weiterhin Vorrang vor einem weit entfernten weichen Ziel hat.
+    if(difficultyAtLeast('medium')){
+      const occupant = units.find(o=>o.x===t.x && o.y===t.y && o.hp>0 && !o.hostId && o.owner!==unit.owner);
+      if(occupant && (occupant.type==='transport' || occupant.type==='artillery')) d -= 3;
+    }
     if(d<bestDist){ bestDist=d; best=t; }
   }
   if(!best) return;
@@ -3094,7 +3179,23 @@ function aiActShipWithCargo(ship){
   ship.moved = true;
   ship.actedAtAll = true;
 
-  if(ship.cargo.length>0){
+  // KI-Schwierigkeit medium+: die komplette Fracht auf einmal absetzen statt nur eine
+  // Einheit pro Zug — das Schiff fährt danach (siehe aiActShipPickup) leer zur Sammelstadt
+  // zurück, statt für jede einzelne Ladung extra hin- und herzupendeln.
+  if(difficultyAtLeast('medium')){
+    for(const cargoId of ship.cargo.slice()){
+      const cargoUnit = units.find(u=>u.id===cargoId);
+      if(!cargoUnit) continue;
+      const landSpot = adjacentTiles(ship.x,ship.y).find(a =>
+        map[a.y][a.x].type!==T_WATER && terrainAllowed(map[a.y][a.x], cargoUnit) && unitsAt(a.x,a.y).length===0);
+      if(landSpot){
+        cargoUnit.x=landSpot.x; cargoUnit.y=landSpot.y; cargoUnit.hostId=null;
+        cargoUnit.orderState=null;
+        cargoUnit.moved=true; cargoUnit.movesLeft=0; cargoUnit.actedAtAll=true;
+        ship.cargo = ship.cargo.filter(id=>id!==cargoUnit.id);
+      }
+    }
+  } else if(ship.cargo.length>0){
     const cargoUnit = units.find(u=>u.id===ship.cargo[0]);
     if(cargoUnit){
       const landSpot = adjacentTiles(ship.x,ship.y).find(a =>
@@ -3120,7 +3221,32 @@ function aiActShipPickup(ship){
     if(!s.canCarry.includes(u.type)) return false;
     return isCoastal(u.x,u.y);
   });
-  if(stranded.length===0){ aiActUnit(ship); return; }
+  if(stranded.length===0){
+    // KI-Schwierigkeit medium+: nichts zum Abholen in der Nähe — statt ziellos wie eine
+    // Kampfeinheit umherzuziehen, zur Sammelstadt zurückkehren, wo frisch gebaute Truppen
+    // (siehe ensureRallyCity/processCityProduction-rallyPoint) auf Abholung warten.
+    if(difficultyAtLeast('medium')){
+      const rally = rallyCityByOwner[ship.owner];
+      if(rally && !(ship.x===rally.x && ship.y===rally.y)){
+        const path = computePathTowards(ship, rally);
+        if(path && path.length>0){
+          let remaining = ship.movesLeft;
+          for(const step of path){
+            const cost = terrainCost(map[step.y][step.x], ship);
+            if(cost>remaining) break;
+            remaining -= cost;
+            ship.x=step.x; ship.y=step.y;
+          }
+          ship.movesLeft = remaining;
+          ship.moved = true;
+          ship.actedAtAll = true;
+          return;
+        }
+      }
+    }
+    aiActUnit(ship);
+    return;
+  }
 
   let best=null, bestDist=Infinity;
   for(const u of stranded){
