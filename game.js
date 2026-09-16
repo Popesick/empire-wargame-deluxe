@@ -639,6 +639,112 @@ function computeLandmasses(){
   return { id, components };
 }
 
+// Enhanced KI (Phase 3): welche Landmasse hat die meisten Städte? Nur beim Archipel-
+// Kartentyp relevant — der zentrale Kontinent gilt dort als "Landmasse-Stil", die 8
+// Satelliteninseln als "Insel-Stil" (siehe isLandmassStyle). Einmal pro Partie berechnet,
+// da sich Landmassen/Städte-Grundausstattung innerhalb einer Partie nicht mehr ändern
+// (Cache-Reset in initGame/loadGame, analog zu landmassId selbst).
+let largestLandmassCache = null;
+function computeLargestLandmass(){
+  const counts = new Map();
+  for(let y=0;y<ROWS;y++){
+    for(let x=0;x<COLS;x++){
+      if(map[y][x].type!==T_CITY) continue;
+      const lm = landmassId[y][x];
+      if(lm<0) continue;
+      counts.set(lm, (counts.get(lm)||0)+1);
+    }
+  }
+  let best=-1, bestCount=-1;
+  for(const [lm,c] of counts) if(c>bestCount){ bestCount=c; best=lm; }
+  return best;
+}
+
+// true = "Landmasse-Stil" (KI-Gates nach Einheiten-Anteil + Städte-Prozentsatz-Zielwerten),
+// false = "Insel-Stil" (KI-Gates nach 100%-Städtekontrolle + absoluten Zielwerten).
+function isLandmassStyle(lm){
+  if(mapConfig.landform==='continent') return true;
+  if(mapConfig.landform==='islands') return false;
+  if(largestLandmassCache===null) largestLandmassCache = computeLargestLandmass();
+  return lm === largestLandmassCache;
+}
+
+// Anteil eigener (lebender, nicht als Fracht verladener) Einheiten an allen Einheiten auf
+// der Landmasse lm — Grundlage für das Landmasse-Sicherheits-Gate (siehe meetsAiConstructionGateA).
+function unitShareOnLandmass(owner, lm){
+  let mine=0, total=0;
+  for(const u of units){
+    if(u.hp<=0 || u.hostId) continue;
+    const ulm = (landmassId[u.y] && landmassId[u.y][u.x]!==undefined) ? landmassId[u.y][u.x] : -1;
+    if(ulm!==lm) continue;
+    total++;
+    if(u.owner===owner) mine++;
+  }
+  return total>0 ? mine/total : 0;
+}
+
+function totalCitiesOnLandmass(lm){
+  let n=0;
+  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++)
+    if(map[y][x].type===T_CITY && !map[y][x].ruined && landmassId[y][x]===lm) n++;
+  return n;
+}
+
+function citiesOwnedByOnLandmass(owner, lm){
+  let n=0;
+  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++)
+    if(map[y][x].type===T_CITY && !map[y][x].ruined && map[y][x].owner===owner && landmassId[y][x]===lm) n++;
+  return n;
+}
+
+// Genereller Zähler "wie viele eigene Kacheln auf lm erfüllen predicate?" — für die vier
+// unabhängigen Ausbau-Zielwert-Zählungen (Festung, Stadt-/Festungsverteidigung, Stadt
+// gründen) in aiActEngineer/pickAiBuildType wiederverwendet.
+function countOwnerStructuresOnLandmass(owner, lm, predicate){
+  let n=0;
+  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++){
+    const t = map[y][x];
+    if(t.owner===owner && landmassId[y][x]===lm && predicate(t)) n++;
+  }
+  return n;
+}
+
+function livingEngineersOnLandmass(owner, lm){
+  return units.filter(u => u.owner===owner && u.hp>0 && u.type==='engineer' &&
+    (landmassId[u.y] && landmassId[u.y][u.x]!==undefined ? landmassId[u.y][u.x] : -1) === lm).length;
+}
+
+// Sicherheits-Gate (Enhanced KI, Phase 3): Städte-/Festungsausbauten (inkl. Festungsbau
+// selbst) kosten Ingenieur-Bauzeit, die sonst der Einheitenproduktion fehlt — die KI
+// verfolgt sie daher erst, wenn sie auf der jeweiligen Landmasse militärisch sicher genug
+// ist. Landmasse-Stil: Einheiten-Anteil-Schwelle nach Schwierigkeitsgrad. Insel-Stil:
+// erst bei 100% Städtekontrolle, unabhängig vom Schwierigkeitsgrad.
+const LANDMASS_UNIT_SHARE_GATE = { easy:0.20, medium:0.25, hard:0.30 };
+function meetsAiConstructionGateA(owner, lm){
+  if(isLandmassStyle(lm)){
+    const diff = mapConfig.difficulty || 'easy';
+    return unitShareOnLandmass(owner, lm) >= (LANDMASS_UNIT_SHARE_GATE[diff] || LANDMASS_UNIT_SHARE_GATE.easy);
+  }
+  const total = totalCitiesOnLandmass(lm);
+  return total>0 && citiesOwnedByOnLandmass(owner, lm) === total;
+}
+
+// Ziel-Obergrenze je Ausbau-Aktionstyp, sobald Gate A offen ist. Landmasse-Stil: Prozentsatz
+// der Städtezahl der Landmasse. Insel-Stil: absolute Zielwerte je Schwierigkeitsgrad
+// ("mehr als 5" bei hard wird bewusst als unbegrenzt statt fester Obergrenze behandelt).
+const LANDMASS_STRUCTURE_PCT_GATE = { easy:0.10, medium:0.20, hard:0.30 };
+const ISLAND_STRUCTURE_TARGET_RANGE = { easy:[1,2], medium:[4,5], hard:[Infinity,Infinity] };
+function aiConstructionTargetOnLandmass(owner, lm){
+  const diff = mapConfig.difficulty || 'easy';
+  if(isLandmassStyle(lm)){
+    const pct = LANDMASS_STRUCTURE_PCT_GATE[diff] || LANDMASS_STRUCTURE_PCT_GATE.easy;
+    return Math.max(1, Math.round(totalCitiesOnLandmass(lm) * pct));
+  }
+  const [lo,hi] = ISLAND_STRUCTURE_TARGET_RANGE[diff] || ISLAND_STRUCTURE_TARGET_RANGE.easy;
+  if(hi===Infinity) return Infinity;
+  return lo + Math.floor(Math.random()*(hi-lo+1));
+}
+
 function isCoastal(x,y){
   return DIRS4.some(([dx,dy]) => {
     const nx=x+dx, ny=y+dy;
@@ -2718,7 +2824,7 @@ function buildUnitInfoTable(){
 }
 
 /* ---------- STÄDTE: PRODUKTION ---------- */
-function pickAiBuildType(coastal, tile){
+function pickAiBuildType(coastal, tile, owner, lm){
   const t = turnNumber;
   let weights;
   // KI-Schwierigkeit medium+: früher auf Panzer/Artillerie statt überwiegend Infanterie setzen.
@@ -2735,7 +2841,15 @@ function pickAiBuildType(coastal, tile){
   }
   // Enhanced: KI baut auch Ingenieure, damit sie Straßen/Eisenbahn/Festungen/Radar
   // tatsächlich einsetzt — moderates Gewicht, kein Kampfwert also nicht zu viele davon.
-  if(isEnhanced()) weights = Object.assign({}, weights, { engineer: t < 6 ? 0.1 : 0.12 });
+  // Phase 3: neue Ingenieure werden nur noch produziert, solange die Landmasse militärisch
+  // sicher genug ist (Gate A, siehe meetsAiConstructionGateA) UND die 3er-Kappung pro
+  // Landmasse noch Platz lässt — sonst bräuchte die KI Bauzeit für Ausbauten ab, während sie
+  // eigentlich noch um die Landmasse kämpft.
+  if(isEnhanced()){
+    const engineerAllowed = lm!==undefined && lm>=0 &&
+      meetsAiConstructionGateA(owner, lm) && livingEngineersOnLandmass(owner, lm) < 3;
+    weights = Object.assign({}, weights, { engineer: engineerAllowed ? (t < 6 ? 0.1 : 0.12) : 0 });
+  }
   // KI-Schwierigkeit hard (Enhanced): eine spezialisierte Stadt baut nur noch passende
   // Einheiten — Ingenieure bleiben als neutraler Nutztyp erlaubt, sonst könnte die KI z.B.
   // nie wieder ein Radar bauen, sobald jede Stadt spezialisiert ist.
@@ -2814,7 +2928,10 @@ function processCityProduction(owner){
           // Städte fassen beliebig viele Einheiten — neue Einheiten spawnen direkt dort.
           const spawned = spawnUnit(owner, type, x, y);
           tile.buildPoints -= cost;
-          if(owner!==OWNER_PLAYER) tile.buildType = pickAiBuildType(isCoastal(x,y), tile);
+          if(owner!==OWNER_PLAYER){
+            const lm = (landmassId[y] && landmassId[y][x]!==undefined) ? landmassId[y][x] : -1;
+            tile.buildType = pickAiBuildType(isCoastal(x,y), tile, owner, lm);
+          }
           if(tile.rallyPoint && !(tile.rallyPoint.x===x && tile.rallyPoint.y===y)){
             setDestination(spawned, tile.rallyPoint.x, tile.rallyPoint.y, true, true);
           }
@@ -3498,9 +3615,33 @@ function aiActEngineer(unit){
     }
   }
 
-  if([T_PLAIN,T_FOREST,T_HILLS,T_MOUNTAIN].includes(tile.type) && !tile.fortress && Math.random()<0.35){
-    startEngineerBuild(unit, 'fortress', 20);
-    return;
+  // Phase 3: Stadt-/Festungsausbauten (inkl. Festungsbau selbst) verfolgt die KI erst, wenn
+  // sie auf der jeweiligen Landmasse/Insel militärisch sicher genug ist (Gate A) — Bauzeit
+  // dafür fehlt sonst der Einheitenproduktion. Je Aktionstyp gilt zusätzlich ein eigener
+  // Ziel-Obergrenze (Gate B), damit die KI nicht jede Gelegenheit sofort nutzt.
+  const myLmForBuild = (landmassId[unit.y] && landmassId[unit.y][unit.x]!==undefined) ? landmassId[unit.y][unit.x] : -1;
+  const buildableGround = [T_PLAIN,T_FOREST,T_HILLS,T_MOUNTAIN].includes(tile.type);
+  if(myLmForBuild>=0 && meetsAiConstructionGateA(owner, myLmForBuild)){
+    if(buildableGround && tile.fortressLevel===0 && Math.random()<0.35 &&
+       countOwnerStructuresOnLandmass(owner, myLmForBuild, t=>t.fortressLevel>0) < aiConstructionTargetOnLandmass(owner, myLmForBuild)){
+      startEngineerBuild(unit, 'fortress', 20);
+      return;
+    }
+    if(tile.type===T_CITY && !tile.ruined && tile.owner===owner && !tile.cityDefenseLevel && Math.random()<0.18 &&
+       countOwnerStructuresOnLandmass(owner, myLmForBuild, t=>t.type===T_CITY && t.cityDefenseLevel) < aiConstructionTargetOnLandmass(owner, myLmForBuild)){
+      startEngineerBuild(unit, 'cityDefense', 20);
+      return;
+    }
+    if(tile.fortressLevel===1 && tile.owner===owner && Math.random()<0.18 &&
+       countOwnerStructuresOnLandmass(owner, myLmForBuild, t=>t.fortressLevel===2) < aiConstructionTargetOnLandmass(owner, myLmForBuild)){
+      startEngineerBuild(unit, 'fortressDefense', 25);
+      return;
+    }
+    if(buildableGround && tile.fortressLevel===0 && Math.random()<0.15 &&
+       countOwnerStructuresOnLandmass(owner, myLmForBuild, t=>t.type===T_CITY && t.founded) < aiConstructionTargetOnLandmass(owner, myLmForBuild)){
+      startEngineerBuild(unit, 'foundCity', 50);
+      return;
+    }
   }
 
   // KI-Schwierigkeit hard: gezielt Schiene zur Sammelstadt bauen (statt nur gelegentlich
@@ -4683,6 +4824,7 @@ function initGame(){
   radarPositions = [];
   rallyCityByOwner = {};
   invasionFleetByOwner = {};
+  largestLandmassCache = null;
   closeBuildPanel();
   document.getElementById('unit-info-panel').classList.add('hidden');
   document.getElementById('game-over').classList.add('hidden');
@@ -4810,6 +4952,7 @@ function loadGameFromSlot(slot){
   // innerhalb einer Partie nie, also reicht ein einmaliges Neuberechnen wie bei einer neuen
   // Karte.
   landmassId = computeLandmasses().id;
+  largestLandmassCache = null;
   updateDominanceState();
   refreshRadarPositions();
 
