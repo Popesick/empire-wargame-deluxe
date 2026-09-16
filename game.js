@@ -101,6 +101,7 @@ const T_RADAR = 'radar'; // Enhanced: von Ingenieuren gebaute Struktur, siehe re
 const MOVE_COST = { [T_PLAIN]:1, [T_FOREST]:2, [T_HILLS]:2, [T_MOUNTAIN]:3, [T_WATER]:1, [T_CITY]:1, [T_AIRPORT]:1, [T_RADAR]:1 };
 const SIGHT_RANGE = { ground:2, air:4 };
 const RADAR_SIGHT_RANGE = 9; // Enhanced: Radius, den eine Radarstation dauerhaft aufdeckt
+const FORTRESS_SIGHT_RANGE = 3; // Enhanced: Radius, den eine eigene Festung dauerhaft aufdeckt
 
 /* ---------- KONSTANTEN: SPIELER ---------- */
 const OWNER_PLAYER = 'player';
@@ -208,7 +209,7 @@ let patrolPointA = null;
 let awaitingRallyClick = null; // {x,y} der Stadt, für die gerade ein Sammelpunkt gesetzt wird
 let awaitingEngineerOrder = null; // Enhanced: {kind:'road'|'rail'}, wartet auf Zielklick
 let dragPreviewTarget = null;
-const ENGINEER_BUILD_LABEL = { road:'Straße', rail:'Eisenbahn', fortress:'Festung', radar:'Radar', airport:'Flughafen', rebuild:'Wiederaufbau' };
+const ENGINEER_BUILD_LABEL = { road:'Straße', rail:'Eisenbahn', fortress:'Festung', radar:'Radar', airport:'Flughafen', rebuild:'Wiederaufbau', cityDefense:'Stadtverteidigung', fortressDefense:'Festungsverteidigung', foundCity:'Stadtgründung' };
 
 const camera = { x:0, y:0, zoom:1 };
 
@@ -887,6 +888,14 @@ function citiesOf(owner){
     if(map[y][x].type===T_CITY && map[y][x].owner===owner) list.push({x,y});
   return list;
 }
+// Enhanced: Festungen sind wie Städte eroberbare, besitzergebundene Strukturen (siehe
+// resolveStructureAttack), zählen aber nicht als T_CITY — eigener Scan nötig.
+function fortressesOf(owner){
+  const list = [];
+  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++)
+    if(map[y][x].fortressLevel>0 && map[y][x].owner===owner) list.push({x,y});
+  return list;
+}
 function adjacentTiles(x,y){
   return DIRS8.map(([dx,dy])=>({x:x+dx,y:y+dy})).filter(p=>inBounds(p.x,p.y));
 }
@@ -985,6 +994,29 @@ function completeConstructionStep(unit){
     unit.buildOrder = null; unit.moved = false;
     updateInfoPanel('Stadt wiederaufgebaut.');
     return;
+  } else if(order.type==='cityDefense'){
+    // Stadtverteidigung verbessern: Stadt erreicht Panzer-Verteidigungsniveau (siehe
+    // resolveVirtualDefenseCombat/hitChance) — geht bei Eroberung verloren (captureCity).
+    tile.cityDefenseLevel = 1;
+    unit.buildOrder = null; unit.moved = false;
+    updateInfoPanel('Stadtverteidigung verbessert.');
+    return;
+  } else if(order.type==='fortressDefense'){
+    // Festungsverteidigung verbessern: Panzer-Niveau + unbegrenzte Garnison (siehe
+    // slotStatus) — geht bei Eroberung verloren (captureFortress setzt Level auf 1 zurück).
+    tile.fortressLevel = 2;
+    unit.buildOrder = null; unit.moved = false;
+    updateInfoPanel('Festungsverteidigung verbessert.');
+    return;
+  } else if(order.type==='foundCity'){
+    // Stadt gründen: der Ingenieur geht dabei auf, die neue Stadt ist eine ganz normale
+    // (nicht-Hauptstadt) Stadt — tile.founded markiert sie für die KI-Zielwert-Zählung.
+    const owner = unit.owner;
+    const keepRoad = tile.road, keepRail = tile.rail;
+    map[unit.y][unit.x] = Object.assign(newTile(T_CITY), { owner, road:keepRoad, rail:keepRail, founded:true });
+    destroyUnit(unit);
+    updateInfoPanel('Neue Stadt gegründet — der Ingenieur ging dabei auf.');
+    return;
   }
   // Straße/Eisenbahn: nächstes Feld im Pfad in Angriff nehmen, sonst fertig.
   if(order.path && order.path.length>0){
@@ -1005,6 +1037,13 @@ function advanceConstruction(unit){
   const order = unit.buildOrder;
   if(!order || unit.hp<=0) return;
   if(adjacentTiles(unit.x,unit.y).some(t => pickDefenderAt(t.x,t.y,unit))){
+    // Stadt-/Festungsverteidigung verbessern: die Stadt/Festung wird ja gerade ANGEGRIFFEN,
+    // das ist kein Grund, den Ausbau selbst aufzugeben — der Bau pausiert diese Runde nur
+    // (turnsLeft bleibt stehen), statt komplett abgebrochen zu werden.
+    if(order.type==='cityDefense' || order.type==='fortressDefense'){
+      updateInfoPanel(`${ownerLabel(unit.owner)}: Ausbau pausiert — Feindkontakt.`);
+      return;
+    }
     updateInfoPanel(`${ownerLabel(unit.owner)}: Ingenieur hat Feindkontakt — Bauauftrag unterbrochen.`);
     unit.buildOrder = null;
     unit.moved = false;
@@ -1033,7 +1072,9 @@ function slotStatus(x,y,unit){
   if(enemy) return 'combat';
   if(lvl==='ground'){
     const tile = map[y][x];
-    if(tile.type===T_CITY || tile.type===T_AIRPORT) return true; // Städte/Flughäfen: unbegrenzte Garnison
+    // Städte/Flughäfen: unbegrenzte Garnison. Festungen erst nach "Festungsverteidigung
+    // verbessern" (fortressLevel 2) — vorher gilt die normale Straßen-Kapazität wie überall.
+    if(tile.type===T_CITY || tile.type===T_AIRPORT || tile.fortressLevel===2) return true;
     const cap = tile.road ? 2 : 1;
     return occupants.length < cap;
   }
@@ -1940,8 +1981,8 @@ function renderUnitActions(){
       awaitingEngineerOrder = { kind:'rail' };
       updateInfoPanel('Zielpunkt für die Eisenbahn anklicken...');
     }, awaitingEngineerOrder && awaitingEngineerOrder.kind==='rail', 'Eisenbahn bauen');
-    if(buildableGround && !eTile.fortress){
-      addBtn('🏰', () => startEngineerBuild(u, 'fortress', 5), false, 'Festung bauen (5 Runden)');
+    if(buildableGround && eTile.fortressLevel===0){
+      addBtn('🏰', () => startEngineerBuild(u, 'fortress', 20), false, 'Festung bauen (20 Runden)');
     }
     if(fogEnabled && buildableGround && eTile.type!==T_RADAR){
       addBtn('📡', () => startEngineerBuild(u, 'radar', 5), false, 'Radar bauen (5 Runden)');
@@ -1951,6 +1992,15 @@ function renderUnitActions(){
     }
     if(eTile.type===T_CITY && eTile.ruined){
       addBtn('🏗️', () => startEngineerBuild(u, 'rebuild', 15), false, 'Stadt wiederaufbauen (15 Runden)');
+    }
+    if(eTile.type===T_CITY && !eTile.ruined && eTile.owner===u.owner && !eTile.cityDefenseLevel){
+      addBtn('🛡️🏙️', () => startEngineerBuild(u, 'cityDefense', 20), false, 'Stadtverteidigung verbessern (20 Runden): Stadt erreicht Panzer-Verteidigungsniveau, stationierte Einheiten erhalten +20% Verteidigung');
+    }
+    if(eTile.fortressLevel===1 && eTile.owner===u.owner){
+      addBtn('🛡️🏰', () => startEngineerBuild(u, 'fortressDefense', 25), false, 'Festungsverteidigung verbessern (25 Runden): Festung erreicht Panzer-Verteidigungsniveau, unbegrenzte Garnison, stationierte Einheiten erhalten zusätzlich +10% Verteidigung');
+    }
+    if(buildableGround && eTile.fortressLevel===0){
+      addBtn('🏙️➕', () => startEngineerBuild(u, 'foundCity', 50), false, 'Stadt gründen (50 Runden): der Ingenieur geht dabei verloren');
     }
   }
 }
@@ -2995,6 +3045,9 @@ function hostileTargetsFor(owner){
   for(const o of activeOwners()){
     if(o===owner || areAllied(owner,o)) continue;
     citiesOf(o).forEach(c=>targets.push({x:c.x,y:c.y}));
+    // Enhanced: Festungen sind seit der Überarbeitung aktiv eroberbare Ziele wie Städte
+    // (siehe resolveStructureAttack), nicht mehr nur ein passiver Terrain-Bonus.
+    fortressesOf(o).forEach(f=>targets.push({x:f.x,y:f.y}));
   }
   citiesOf(OWNER_NEUTRAL).forEach(c=>targets.push({x:c.x,y:c.y}));
   units.filter(u=>u.owner!==owner && u.owner!==OWNER_NEUTRAL && !areAllied(owner,u.owner) && u.hp>0 && !u.hostId)
@@ -3446,7 +3499,7 @@ function aiActEngineer(unit){
   }
 
   if([T_PLAIN,T_FOREST,T_HILLS,T_MOUNTAIN].includes(tile.type) && !tile.fortress && Math.random()<0.35){
-    startEngineerBuild(unit, 'fortress', 5);
+    startEngineerBuild(unit, 'fortress', 20);
     return;
   }
 
@@ -3792,6 +3845,9 @@ function recomputeVisibility(){
   // von Einheiten/Städten in der Nähe (radarPositions wird pro Zug in refreshRadarPositions
   // aktualisiert, kein Kartenscan bei jedem Aufruf hier).
   for(const r of radarPositions) if(r.owner===OWNER_PLAYER) sources.push({x:r.x, y:r.y, range: RADAR_SIGHT_RANGE});
+  // Enhanced: eine eigene Festung deckt (wie Radar) dauerhaft Radius 3 auf, unabhängig von
+  // stationierten Einheiten — Festungen sind nach der Überarbeitung besitzergebunden.
+  for(const f of fortressesOf(OWNER_PLAYER)) sources.push({x:f.x, y:f.y, range: FORTRESS_SIGHT_RANGE});
   for(const src of sources){
     for(const [nx,ny] of tilesInRadius(src.x, src.y, src.range)){
       const k = key(nx,ny);
