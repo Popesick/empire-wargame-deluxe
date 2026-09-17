@@ -212,7 +212,7 @@ let patrolPointA = null;
 let awaitingRallyClick = null; // {x,y} der Stadt, für die gerade ein Sammelpunkt gesetzt wird
 let awaitingEngineerOrder = null; // Enhanced: {kind:'road'|'rail'}, wartet auf Zielklick
 let dragPreviewTarget = null;
-const ENGINEER_BUILD_LABEL = { road:'Straße', rail:'Eisenbahn', fortress:'Festung', radar:'Radar', airport:'Flughafen', rebuild:'Wiederaufbau', cityDefense:'Stadtverteidigung', fortressDefense:'Festungsverteidigung', foundCity:'Stadtgründung' };
+const ENGINEER_BUILD_LABEL = { road:'Straße', rail:'Eisenbahn', fortress:'Festung', radar:'Radar', airport:'Flughafen', rebuild:'Wiederaufbau', cityDefense:'Stadtverteidigung', fortressDefense:'Festungsverteidigung', foundCity:'Stadtgründung', antiAir:'Flugabwehr' };
 
 const camera = { x:0, y:0, zoom:1 };
 
@@ -462,7 +462,11 @@ function newTile(type){
     cityDefenseLevel:0,
     // Markiert eine per Ingenieur ("Stadt gründen") neu geschaffene Stadt, unterscheidet sie
     // von ursprünglich kartengenerierten Städten (für KI-Zielwert-Zählung, siehe Phase 3).
-    founded:false };
+    founded:false,
+    // Enhanced: Flugabwehr (0/1) — nur in bereits ausgebauten Städten/Festungen baubar,
+    // +100% Verteidigung gegen Luftangriffe für dort stationierte Einheiten (siehe
+    // hitChance), geht wie die anderen Ausbaustufen bei Eroberung verloren.
+    antiAirLevel:0 };
 }
 
 function rollTerrain(){
@@ -1193,6 +1197,14 @@ function completeConstructionStep(unit){
     unit.buildOrder = null; unit.moved = false;
     updateInfoPanel('Festungsverteidigung verbessert.');
     return;
+  } else if(order.type==='antiAir'){
+    // Flugabwehr: nur in bereits ausgebauten Städten/Festungen baubar (siehe
+    // renderUnitActions) — +100% Verteidigung gegen Luftangriffe (siehe hitChance), geht
+    // bei Eroberung verloren (captureCity/captureFortress).
+    tile.antiAirLevel = 1;
+    unit.buildOrder = null; unit.moved = false;
+    updateInfoPanel('Flugabwehr fertiggestellt.');
+    return;
   } else if(order.type==='foundCity'){
     // Stadt gründen: der Ingenieur geht dabei auf, die neue Stadt ist eine ganz normale
     // (nicht-Hauptstadt) Stadt — tile.founded markiert sie für die KI-Zielwert-Zählung.
@@ -1225,7 +1237,7 @@ function advanceConstruction(unit){
     // Stadt-/Festungsverteidigung verbessern: die Stadt/Festung wird ja gerade ANGEGRIFFEN,
     // das ist kein Grund, den Ausbau selbst aufzugeben — der Bau pausiert diese Runde nur
     // (turnsLeft bleibt stehen), statt komplett abgebrochen zu werden.
-    if(order.type==='cityDefense' || order.type==='fortressDefense'){
+    if(order.type==='cityDefense' || order.type==='fortressDefense' || order.type==='antiAir'){
       updateInfoPanel(`${ownerLabel(unit.owner)}: Ausbau pausiert — Feindkontakt.`);
       return;
     }
@@ -1430,6 +1442,12 @@ function hitChance(attacker, defender, attackerCrippled){
       const defTile = map[defender.y][defender.x];
       if(defTile.type===T_CITY && defTile.cityDefenseLevel) chance -= effStat(defender,'defense') * 0.20 * 0.6;
       if(defTile.fortressLevel===2) chance -= effStat(defender,'defense') * 0.10 * 0.6;
+      // Flugabwehr: +100% Verteidigung der dort stationierten Einheiten gegen Luftangriffe
+      // — unabhängiger Term, kombiniert sich automatisch (aber nur additiv, kein
+      // Vervielfachen) mit dem Radar-Bonus weiter unten, der selbst weiterhin eine reine
+      // Bool-Prüfung (isNearOwnRadar) bleibt und daher über mehrere Radarstationen nicht
+      // stapelt.
+      if(defTile.antiAirLevel && a.category==='air') chance -= effStat(defender,'defense') * 1.0 * 0.6;
     }
     // Radar: eigene Flugzeuge im Umkreis haben einen Vorteil gegen feindliche Flugzeuge.
     if(fogEnabled && a.category==='air' && d.category==='air'){
@@ -1555,6 +1573,7 @@ function captureCity(x,y, owner, capturingUnit){
   // Enhanced: ein laufender/abgeschlossener Stadtverteidigung-Ausbau geht bei Eroberung
   // komplett verloren (wie gefordert) — die neue Besatzung erbt keine fremden Befestigungen.
   tile.cityDefenseLevel = 0;
+  tile.antiAirLevel = 0;
   evictAirUnitsNotOwnedBy(x, y, owner);
 }
 
@@ -1565,6 +1584,7 @@ function captureFortress(x, y, owner){
   const tile = map[y][x];
   tile.owner = owner;
   tile.fortressLevel = 1;
+  tile.antiAirLevel = 0;
   evictAirUnitsNotOwnedBy(x, y, owner);
 }
 
@@ -2200,6 +2220,9 @@ function renderUnitActions(){
     }
     if(buildableGround && eTile.fortressLevel===0){
       addBtn('🏙️➕', () => startEngineerBuild(u, 'foundCity', 50), false, 'Stadt gründen (50 Runden): der Ingenieur geht dabei verloren');
+    }
+    if(((eTile.type===T_CITY && !eTile.ruined && eTile.cityDefenseLevel) || eTile.fortressLevel===2) && eTile.owner===u.owner && !eTile.antiAirLevel){
+      addBtn('🛡️✈️', () => startEngineerBuild(u, 'antiAir', 25), false, 'Flugabwehr bauen (25 Runden): +100% Verteidigung gegen Luftangriffe für stationierte Einheiten — nur in bereits ausgebauten Städten/Festungen möglich');
     }
   }
 }
@@ -3805,6 +3828,19 @@ function aiActEngineer(unit){
         return;
       }
     }
+    if(countOwnerStructuresOnLandmass(owner, myLmForBuild, t=>t.antiAirLevel) < aiConstructionTargetOnLandmass(owner, myLmForBuild)){
+      const antiAirEligible = t => ((t.type===T_CITY && !t.ruined && t.cityDefenseLevel) || t.fortressLevel===2) && !t.antiAirLevel;
+      if(isHardBuilder){
+        const spot = mostExposedOwnTileOnLandmass(owner, myLmForBuild, antiAirEligible);
+        if(spot){
+          if(unit.x===spot.x && unit.y===spot.y){ startEngineerBuild(unit, 'antiAir', 25); return; }
+          aiEngineerMoveTowards(unit, spot); return;
+        }
+      } else if(antiAirEligible(tile) && tile.owner===owner && Math.random()<0.18){
+        startEngineerBuild(unit, 'antiAir', 25);
+        return;
+      }
+    }
   }
 
   // KI-Schwierigkeit hard: gezielt Schiene zur Sammelstadt bauen (statt nur gelegentlich
@@ -5050,6 +5086,7 @@ function serializeTile(t){
   if(t.fortressLevel) c.fortressLevel = t.fortressLevel;
   if(t.cityDefenseLevel) c.cityDefenseLevel = t.cityDefenseLevel;
   if(t.founded) c.founded = true;
+  if(t.antiAirLevel) c.antiAirLevel = t.antiAirLevel;
   return c;
 }
 
