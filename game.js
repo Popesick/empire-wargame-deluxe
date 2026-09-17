@@ -1920,8 +1920,14 @@ function selectUnit(u){
         if(seenAttack.has(tk)) continue;
         const def = pickDefenderAt(t.x,t.y,u);
         if(def){
-          const entryCost = o.d + terrainCost(map[t.y][t.x], u);
-          if(entryCost <= u.movesLeft){ attackableTiles.push(t); seenAttack.add(tk); }
+          // Kosten, um NEBEN das Ziel zu gelangen — das Zielfeld selbst wird beim Angriff
+          // nie betreten (siehe handleGameClick: Nahkampf-Einheiten müssen sich erst
+          // heranbewegen, bevor der Kampf beginnt, und bleiben danach auf dieser
+          // Nachbarkachel stehen statt am ursprünglichen Startpunkt).
+          if(o.d <= u.movesLeft){
+            attackableTiles.push({x:t.x, y:t.y, from:{x:o.x,y:o.y}, fromCost:o.d});
+            seenAttack.add(tk);
+          }
           continue;
         }
         const tile = map[t.y][t.x];
@@ -1930,7 +1936,7 @@ function selectUnit(u){
         // — kein Angriffsziel, einfach begehbares Gelände (nur ein Ingenieur kann sie
         // wiederaufbauen).
         if(occ.length===0 && ((tile.type===T_CITY && !tile.ruined) || tile.type===T_AIRPORT || tile.type===T_RADAR) && tile.owner!==u.owner && stats.subclass==='land'){
-          attackableTiles.push(t);
+          attackableTiles.push({x:t.x, y:t.y, from:{x:o.x,y:o.y}, fromCost:o.d});
           seenAttack.add(tk);
         }
       }
@@ -2011,15 +2017,22 @@ function finishUnitTurn(unit){
 // Wie finishUnitTurn, wartet aber zuerst, bis eine laufende Bewegungsanimation dieser
 // Einheit fertig ist — so bleibt der Fokus/die Kamera auf der Einheit, bis sie ihr Ziel
 // sichtbar erreicht hat, statt schon während des Gleitens zur nächsten zu springen.
-function finishUnitTurnAfterAnim(unit){
+// Wartet, bis eine laufende Bewegungsanimation dieser Einheit fertig ist, und ruft erst
+// dann cb() auf — z.B. um den Kampf-Blink erst NACH dem sichtbaren Heranmarsch zu zeigen
+// (siehe attackableTiles-Zweig in handleGameClick), statt beides zu überlappen.
+function afterAnim(unit, cb){
   if(unit && unit._animFrom){
     const remaining = unit._animDuration - (performance.now() - unit._animStart);
     if(remaining > 0){
-      setTimeout(() => finishUnitTurnAfterAnim(unit), remaining + 20);
+      setTimeout(() => afterAnim(unit, cb), remaining + 20);
       return;
     }
   }
-  finishUnitTurn(unit);
+  cb();
+}
+
+function finishUnitTurnAfterAnim(unit){
+  afterAnim(unit, () => finishUnitTurn(unit));
 }
 
 // Bewusst auf die Basics beschränkt — Farbcodes/Hotkeys stehen schon auf den Buttons,
@@ -2583,66 +2596,90 @@ function handleGameClick(sx, sy){
     }
 
     if(attackableTiles.some(t=>t.x===x && t.y===y)){
-      const animFromX = selectedUnit.x, animFromY = selectedUnit.y;
+      // Nahkampf-Einheiten (auch mit großer Restreichweite, z.B. Panzer) müssen sich erst
+      // sichtbar neben das Ziel bewegen, bevor der Kampf beginnt — und bleiben danach auf
+      // dieser Nachbarkachel stehen (oder im eroberten Feld), statt am ursprünglichen
+      // Standort zu "kämpfen", ohne sich je dorthin zu bewegen (gemeldeter Bug). Der
+      // Zwischenschritt deckt dabei wie jede andere Bewegung Nebel des Krieges auf.
+      const atkEntry = attackableTiles.find(t=>t.x===x && t.y===y);
+      const moveFrom = atkEntry.from;
+      const preMoveX = selectedUnit.x, preMoveY = selectedUnit.y;
+      const needsMove = !(moveFrom.x===preMoveX && moveFrom.y===preMoveY);
+      const attackingUnit = selectedUnit;
       const destTile = map[y][x];
-      if(isCapturableStructureTile(destTile) && destTile.owner!==selectedUnit.owner){
-        // Zentrale Reihenfolge (siehe resolveStructureAttack): erst alle Boden-Verteidiger
-        // einzeln, dann die Struktur-eigene Verteidigung, erst dann der Einzug — Luft-
-        // Einheiten am Feld zählen dabei nie als Verteidigung.
-        const attackerSnap = snapshotUnit(selectedUnit);
-        const groundDef = groundDefendersAt(x, y, selectedUnit)[0];
-        const virtualType = (destTile.fortressLevel===2 || destTile.cityDefenseLevel) ? 'tank' : 'infantry';
-        const defenderSnap = groundDef ? snapshotUnit(groundDef) : { x, y, type:virtualType, owner: destTile.owner };
-        const res = resolveStructureAttack(selectedUnit, x, y);
-        if(res.winner==='attacker'){
-          if(res.captured){
-            const label = destTile.type===T_AIRPORT ? 'Flughafen' : destTile.type===T_RADAR ? 'Radarstation' : destTile.fortressLevel ? 'Festung' : 'Stadt';
-            updateInfoPanel(`${label} erobert!`);
+      if(needsMove){
+        // Eingabe sperren, bis die gesamte Angriffssequenz (Heranmarsch + Kampf) fertig
+        // ist — sonst könnte der Spieler mitten in der asynchronen Wartezeit eine andere
+        // Einheit anwählen, während dieser Angriff noch "in der Warteschlange" hängt.
+        inputLocked = true;
+        revealPathFog(attackingUnit, reconstructReachPath(reachPrev, key(preMoveX,preMoveY), moveFrom.x, moveFrom.y));
+        attackingUnit.movesLeft = Math.max(0, attackingUnit.movesLeft - atkEntry.fromCost);
+        attackingUnit.actedAtAll = true;
+        attackingUnit.x = moveFrom.x; attackingUnit.y = moveFrom.y;
+        queueMoveAnim(attackingUnit, preMoveX, preMoveY);
+      }
+      afterAnim(attackingUnit, () => {
+        inputLocked = false;
+        const animFromX = attackingUnit.x, animFromY = attackingUnit.y;
+        if(isCapturableStructureTile(destTile) && destTile.owner!==attackingUnit.owner){
+          // Zentrale Reihenfolge (siehe resolveStructureAttack): erst alle Boden-Verteidiger
+          // einzeln, dann die Struktur-eigene Verteidigung, erst dann der Einzug — Luft-
+          // Einheiten am Feld zählen dabei nie als Verteidigung.
+          const attackerSnap = snapshotUnit(attackingUnit);
+          const groundDef = groundDefendersAt(x, y, attackingUnit)[0];
+          const virtualType = (destTile.fortressLevel===2 || destTile.cityDefenseLevel) ? 'tank' : 'infantry';
+          const defenderSnap = groundDef ? snapshotUnit(groundDef) : { x, y, type:virtualType, owner: destTile.owner };
+          const res = resolveStructureAttack(attackingUnit, x, y);
+          if(res.winner==='attacker'){
+            if(res.captured){
+              const label = destTile.type===T_AIRPORT ? 'Flughafen' : destTile.type===T_RADAR ? 'Radarstation' : destTile.fortressLevel ? 'Festung' : 'Stadt';
+              updateInfoPanel(`${label} erobert!`);
+            } else {
+              updateInfoPanel('Gegner besiegt — Einheit bleibt auf ihrem Feld.');
+            }
+            if(units.includes(attackingUnit)){ attackingUnit.moved = true; attackingUnit.movesLeft = 0; attackingUnit.actedAtAll = true; }
           } else {
-            updateInfoPanel('Gegner besiegt — Einheit bleibt auf ihrem Feld.');
+            updateInfoPanel('Eigene Einheit im Kampf verloren!');
           }
-          if(units.includes(selectedUnit)){ selectedUnit.moved = true; selectedUnit.movesLeft = 0; selectedUnit.actedAtAll = true; }
-        } else {
-          updateInfoPanel('Eigene Einheit im Kampf verloren!');
+          const finishedUnit = attackingUnit;
+          // Sowohl die Positionsänderung als auch die Bewegungsanimation erfolgen erst NACH
+          // der Kampfsequenz — sonst stünde die Einheit optisch schon im eroberten Feld,
+          // während der Ausgang (Blinken) noch offen ist.
+          playCombatSequence(attackerSnap, defenderSnap, () => {
+            if(res.entered && units.includes(finishedUnit)){
+              finishedUnit.x = x; finishedUnit.y = y;
+              queueMoveAnim(finishedUnit, animFromX, animFromY);
+            }
+            finishUnitTurnAfterAnim(finishedUnit);
+          });
+          return;
         }
-        const finishedUnit = selectedUnit;
-        // Sowohl die Positionsänderung als auch die Bewegungsanimation erfolgen erst NACH
-        // der Kampfsequenz — sonst stünde die Einheit optisch schon im eroberten Feld,
-        // während der Ausgang (Blinken) noch offen ist.
-        playCombatSequence(attackerSnap, defenderSnap, () => {
-          if(res.entered && units.includes(finishedUnit)){
-            finishedUnit.x = x; finishedUnit.y = y;
-            queueMoveAnim(finishedUnit, animFromX, animFromY);
+        const def = pickDefenderAt(x,y,attackingUnit);
+        if(def){
+          const attackerSnap = snapshotUnit(attackingUnit);
+          const defenderSnap = snapshotUnit(def.target);
+          const res = resolveMeleeAttack(attackingUnit, def.target, def.noEntry);
+          let canEnter = false;
+          if(res.winner==='attacker'){
+            // Landeinheiten dürfen Wassereinheiten (und umgekehrt Schiffe Landfelder) nie
+            // tatsächlich betreten, auch wenn sie den Kampf gewinnen — Angriff ja, Einzug nein.
+            canEnter = res.entered && terrainAllowed(destTile, attackingUnit);
+            updateInfoPanel(canEnter ? 'Gegner besiegt, Feld eingenommen!' : 'Gegner besiegt — Einheit bleibt auf ihrem Feld.');
+            if(units.includes(attackingUnit)){ attackingUnit.moved = true; attackingUnit.movesLeft = 0; attackingUnit.actedAtAll = true; }
+          } else {
+            updateInfoPanel('Eigene Einheit im Kampf verloren!');
           }
-          finishUnitTurnAfterAnim(finishedUnit);
-        });
-        return;
-      }
-      const def = pickDefenderAt(x,y,selectedUnit);
-      if(def){
-        const attackerSnap = snapshotUnit(selectedUnit);
-        const defenderSnap = snapshotUnit(def.target);
-        const res = resolveMeleeAttack(selectedUnit, def.target, def.noEntry);
-        let canEnter = false;
-        if(res.winner==='attacker'){
-          // Landeinheiten dürfen Wassereinheiten (und umgekehrt Schiffe Landfelder) nie
-          // tatsächlich betreten, auch wenn sie den Kampf gewinnen — Angriff ja, Einzug nein.
-          canEnter = res.entered && terrainAllowed(destTile, selectedUnit);
-          updateInfoPanel(canEnter ? 'Gegner besiegt, Feld eingenommen!' : 'Gegner besiegt — Einheit bleibt auf ihrem Feld.');
-          if(units.includes(selectedUnit)){ selectedUnit.moved = true; selectedUnit.movesLeft = 0; selectedUnit.actedAtAll = true; }
-        } else {
-          updateInfoPanel('Eigene Einheit im Kampf verloren!');
+          const finishedUnit = attackingUnit;
+          playCombatSequence(attackerSnap, defenderSnap, () => {
+            if(canEnter && units.includes(finishedUnit)){
+              finishedUnit.x = x; finishedUnit.y = y;
+              queueMoveAnim(finishedUnit, animFromX, animFromY);
+            }
+            finishUnitTurnAfterAnim(finishedUnit);
+          });
         }
-        const finishedUnit = selectedUnit;
-        playCombatSequence(attackerSnap, defenderSnap, () => {
-          if(canEnter && units.includes(finishedUnit)){
-            finishedUnit.x = x; finishedUnit.y = y;
-            queueMoveAnim(finishedUnit, animFromX, animFromY);
-          }
-          finishUnitTurnAfterAnim(finishedUnit);
-        });
-        return;
-      }
+      });
+      return;
     }
 
     // Bewegen (inkl. Laden auf Schiff/Träger) — verbraucht nur die tatsächlichen
