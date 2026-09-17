@@ -138,15 +138,18 @@ const UNIT_STATS = {
   destroyer:  { name:'Zerstörer',     label:'D', category:'ground', subclass:'sea',  move:6,  dmg:2, power:60, defense:50, hp:6,  cost:22, range:1, canDefensiveFire:true, portageCapacity:1, canCarry:['infantry','artillery'] },
   transport:  { name:'Transportschiff', label:'X', category:'ground', subclass:'sea', move:5, dmg:1, power:25, defense:30, hp:5,  cost:22, range:0, portageCapacity:4, canCarry:['infantry','tank','artillery'] },
   battleship: { name:'Schlachtschiff', label:'B', category:'ground', subclass:'sea', move:5,  dmg:4, power:70, defense:65, hp:12, cost:46, range:2, canDefensiveFire:true },
-  carrier:    { name:'Träger',        label:'C', category:'ground', subclass:'sea',  move:5,  dmg:1, power:35, defense:50, hp:9,  cost:42, range:0, portageCapacity:3, canCarry:['fighter','helicopter'] },
+  carrier:    { name:'Träger',        label:'C', category:'ground', subclass:'sea',  move:5,  dmg:1, power:35, defense:50, hp:9,  cost:42, range:0, portageCapacity:3, canCarry:['fighter','helicopter','bomber'] },
   submarine:  { name:'U-Boot',        label:'U', category:'ground', subclass:'sea',  move:5,  dmg:2, power:70, defense:30, hp:4,  cost:24, range:0, canDive:true },
   helicopter: { name:'Helikopter',    label:'H', category:'air',    subclass:null,   move:6,  dmg:1, power:50, defense:40, hp:3,  cost:18, range:0, noMountain:true },
   fighter:    { name:'Jäger',         label:'F', category:'air',    subclass:null,   move:10, dmg:1, power:60, defense:30, hp:2,  cost:25, range:0, fuel:8 },
+  // 3x HP, 2x Angriff (Power UND Schaden) gegenüber dem Jäger, halber Treibstoff — stark
+  // gegen Boden-/U-Boot-/Transportziele, schwach im Luftkampf (siehe ENHANCED_MATCHUPS).
+  bomber:     { name:'Bomber',        label:'Bo',category:'air',    subclass:null,   move:10, dmg:2, power:120,defense:30, hp:6,  cost:38, range:0, fuel:4 },
   // Enhanced-exklusiv: kein Angriff (dmg:0 -> gewinnt nie einen Kampf, siehe selectUnit),
   // baut Straßen/Eisenbahn/Festungen/Radar/Flughäfen, siehe advanceConstruction.
   engineer:   { name:'Ingenieur',     label:'E', category:'ground', subclass:'land', move:3,  dmg:0, power:10, defense:25, hp:2,  cost:15, range:0, canBuild:true }
 };
-const BUILD_ORDER = ['infantry','tank','artillery','destroyer','transport','battleship','carrier','submarine','helicopter','fighter'];
+const BUILD_ORDER = ['infantry','tank','artillery','destroyer','transport','battleship','carrier','submarine','helicopter','fighter','bomber'];
 // Enhanced hängt den Ingenieur zusätzlich an — überall dort verwenden, wo Baumenü/KI-
 // Gewichtung/Einheiten-Übersicht die buildbaren Typen auflisten, statt BUILD_ORDER direkt.
 function buildOrderFor(){ return isEnhanced() ? [...BUILD_ORDER, 'engineer'] : BUILD_ORDER; }
@@ -156,7 +159,7 @@ function buildOrderFor(){ return isEnhanced() ? [...BUILD_ORDER, 'engineer'] : B
 // bestehenden Spezialisierung; in der Zeit läuft keine Produktion (siehe processCityProduction).
 const CITY_SPECIALIZATIONS = {
   arms:    { name:'Rüstungsindustrie', icon:'⚔️', types:['infantry','tank','artillery'] },
-  airbase: { name:'Flugwerft',         icon:'🛩️', types:['fighter','helicopter'] },
+  airbase: { name:'Flugwerft',         icon:'🛩️', types:['fighter','helicopter','bomber'] },
   harbor:  { name:'Hafen',             icon:'⚓', types:['destroyer','transport','battleship','carrier','submarine'] }
 };
 function effectiveBuildCost(tile, type){
@@ -399,6 +402,7 @@ let combatFx = null; // { a:{x,y,type,owner}, d:{x,y,type,owner}, blinkOn }
 
 const COMBAT_SOUND = {
   fighter: 'audio/combat-aircraft.mp3',
+  bomber: 'audio/combat-aircraft.mp3',
   helicopter: 'audio/combat-helicopter.mp3',
   artillery: 'audio/combat-artillery.mp3',
   infantry: 'audio/combat-infantry.mp3',
@@ -1370,7 +1374,8 @@ const ENHANCED_MATCHUPS = {
   submarine:  { battleship:15, transport:15, carrier:15 },
   destroyer:  { submarine:15 },
   helicopter: { submarine:15 },
-  fighter:    { helicopter:15, battleship:-15, destroyer:-15 }
+  fighter:    { helicopter:15, battleship:-15, destroyer:-15 },
+  bomber:     { infantry:10, submarine:10, transport:10, tank:10, fighter:-50, helicopter:-50, destroyer:-30 }
 };
 
 // Enhanced: Positionen aller Radarstationen, einmal pro Zugwechsel aktualisiert (siehe
@@ -2904,10 +2909,10 @@ function pickAiBuildType(coastal, tile, owner, lm){
   let weights;
   // KI-Schwierigkeit medium+: früher auf Panzer/Artillerie statt überwiegend Infanterie setzen.
   if(t < 6) weights = difficultyAtLeast('medium')
-    ? { infantry:0.25, tank:0.4, artillery:0.35, destroyer:0, transport:0, battleship:0, carrier:0, submarine:0, helicopter:0, fighter:0 }
-    : { infantry:0.55, tank:0.25, artillery:0.2, destroyer:0, transport:0, battleship:0, carrier:0, submarine:0, helicopter:0, fighter:0 };
-  else if(t < 14) weights = { infantry:0.28, tank:0.24, artillery:0.14, destroyer:0.08, transport:0.08, battleship:0.04, carrier:0.02, submarine:0.04, helicopter:0.06, fighter:0.02 };
-  else weights = { infantry:0.16, tank:0.2, artillery:0.1, destroyer:0.08, transport:0.08, battleship:0.1, carrier:0.06, submarine:0.08, helicopter:0.08, fighter:0.06 };
+    ? { infantry:0.25, tank:0.4, artillery:0.35, destroyer:0, transport:0, battleship:0, carrier:0, submarine:0, helicopter:0, fighter:0, bomber:0 }
+    : { infantry:0.55, tank:0.25, artillery:0.2, destroyer:0, transport:0, battleship:0, carrier:0, submarine:0, helicopter:0, fighter:0, bomber:0 };
+  else if(t < 14) weights = { infantry:0.28, tank:0.24, artillery:0.14, destroyer:0.08, transport:0.08, battleship:0.04, carrier:0.02, submarine:0.04, helicopter:0.06, fighter:0.02, bomber:0.02 };
+  else weights = { infantry:0.16, tank:0.2, artillery:0.1, destroyer:0.08, transport:0.08, battleship:0.1, carrier:0.06, submarine:0.08, helicopter:0.08, fighter:0.06, bomber:0.05 };
   if(!coastal) weights = Object.assign({}, weights, { destroyer:0, transport:0, battleship:0, carrier:0, submarine:0 });
   // KI-Schwierigkeit medium+ auf durchgehender Landmasse: durchgehend starker Panzer-Fokus
   // für schnelle Angriffe statt nur in den ersten Runden (siehe isLandmassSetting).
@@ -4489,6 +4494,7 @@ const UNIT_SPRITE_FILES = {
   helicopter: 'images/units/helicopter.webp',
   engineer: 'images/units/engineer.webp',
   fighter: 'images/units/fighter.webp',
+  bomber: 'images/units/bomber.webp',
   tank: 'images/units/tank.webp',
   battleship: 'images/units/battleship.webp',
   carrier: 'images/units/carrier.webp',
@@ -4687,6 +4693,15 @@ function drawUnitShape(type, isAir){
       break;
     case 'fighter':
       gctx.moveTo(0,-0.4); gctx.lineTo(0.3,0.3); gctx.lineTo(0,0.14); gctx.lineTo(-0.3,0.3);
+      gctx.closePath();
+      break;
+    case 'bomber':
+      // Breiter, massigerer Umriss (Blended-Wing/Delta) als der schlanke Fighter-Pfeil —
+      // klar unterscheidbar auch ohne Sprite.
+      gctx.moveTo(0,-0.42);
+      gctx.lineTo(0.46,0.3); gctx.lineTo(0.16,0.2); gctx.lineTo(0.1,0.38);
+      gctx.lineTo(0,0.28);
+      gctx.lineTo(-0.1,0.38); gctx.lineTo(-0.16,0.2); gctx.lineTo(-0.46,0.3);
       gctx.closePath();
       break;
     case 'helicopter':
