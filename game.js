@@ -276,8 +276,15 @@ function inBounds(x,y){ return x>=0 && x<COLS && y>=0 && y<ROWS; }
 // mit demselben Feld (road/rail) existiert, damit render() pro Kachel nur Segmente von
 // der Mitte zu den tatsächlich verbundenen Kanten zeichnet — dasselbe Segment-Set ergibt
 // automatisch Geraden (2 gegenüberliegende Richtungen), Kurven (2 benachbarte), Abzweige
-// und Sackgassen, ohne Sonderfälle pro Form.
-const CONNECT_DIRS = [{dx:0,dy:-1},{dx:0,dy:1},{dx:1,dy:0},{dx:-1,dy:0}];
+// und Sackgassen, ohne Sonderfälle pro Form. Enthält alle 8 Richtungen (inkl. Diagonalen) —
+// Ingenieur-Pfade laufen über DIRS8 und nutzen Diagonalschritte, wenn sie kostengünstiger
+// sind (siehe computePathTowards); ohne Diagonal-Nachbarn hier würde jede solche Verbindung
+// als zwei isolierte Stummel statt als durchgehende Linie gezeichnet (gemeldeter Bug: sieht
+// wie eine Treppenstufen-Abfolge aus, nicht wie eine glatte Diagonale).
+const CONNECT_DIRS = [
+  {dx:0,dy:-1},{dx:0,dy:1},{dx:1,dy:0},{dx:-1,dy:0},
+  {dx:1,dy:-1},{dx:1,dy:1},{dx:-1,dy:-1},{dx:-1,dy:1}
+];
 function connectedDirs(x, y, field){
   const dirs = [];
   for(const d of CONNECT_DIRS){
@@ -4283,26 +4290,33 @@ function render(){
             gctx.stroke();
           }
         } else {
+          // Allgemeine, richtungsvektor-basierte Berechnung statt der früheren horizontal/
+          // vertikal-Sonderfälle (d.dx!==0 vs. sonst) — funktioniert dadurch unverändert für
+          // die 4 orthogonalen UND jetzt auch für die 4 diagonalen Richtungen (zwei parallele
+          // Linien im Normalenvektor-Abstand + quer liegende Schwellen entlang der
+          // tatsächlichen Fahrtrichtung, statt fest horizontal/vertikal verzerrt zu sein).
+          const steps = 2;
+          const offset = tsz*0.08, overhang = tsz*0.04;
           for(const d of railDirs){
-            const steps = 2;
-            if(d.dx!==0){
-              const y1 = py+tsz*0.42, y2 = py+tsz*0.58;
-              const xEnd = rcx + d.dx*tsz/2;
-              gctx.beginPath(); gctx.moveTo(rcx,y1); gctx.lineTo(xEnd,y1); gctx.stroke();
-              gctx.beginPath(); gctx.moveTo(rcx,y2); gctx.lineTo(xEnd,y2); gctx.stroke();
-              for(let s=1;s<=steps;s++){
-                const tX = rcx + d.dx*(tsz/2)*(s/(steps+1));
-                gctx.beginPath(); gctx.moveTo(tX,y1-tsz*0.04); gctx.lineTo(tX,y2+tsz*0.04); gctx.stroke();
-              }
-            } else {
-              const x1 = px+tsz*0.42, x2 = px+tsz*0.58;
-              const yEnd = rcy + d.dy*tsz/2;
-              gctx.beginPath(); gctx.moveTo(x1,rcy); gctx.lineTo(x1,yEnd); gctx.stroke();
-              gctx.beginPath(); gctx.moveTo(x2,rcy); gctx.lineTo(x2,yEnd); gctx.stroke();
-              for(let s=1;s<=steps;s++){
-                const tY = rcy + d.dy*(tsz/2)*(s/(steps+1));
-                gctx.beginPath(); gctx.moveTo(x1-tsz*0.04,tY); gctx.lineTo(x2+tsz*0.04,tY); gctx.stroke();
-              }
+            const len = Math.hypot(d.dx, d.dy);
+            const ux = d.dx/len, uy = d.dy/len;
+            const perpX = -uy, perpY = ux;
+            const endX = rcx + d.dx*tsz/2, endY = rcy + d.dy*tsz/2;
+            gctx.beginPath();
+            gctx.moveTo(rcx+perpX*offset, rcy+perpY*offset);
+            gctx.lineTo(endX+perpX*offset, endY+perpY*offset);
+            gctx.stroke();
+            gctx.beginPath();
+            gctx.moveTo(rcx-perpX*offset, rcy-perpY*offset);
+            gctx.lineTo(endX-perpX*offset, endY-perpY*offset);
+            gctx.stroke();
+            for(let s=1;s<=steps;s++){
+              const t = s/(steps+1);
+              const cx = rcx + d.dx*(tsz/2)*t, cy = rcy + d.dy*(tsz/2)*t;
+              gctx.beginPath();
+              gctx.moveTo(cx+perpX*(offset+overhang), cy+perpY*(offset+overhang));
+              gctx.lineTo(cx-perpX*(offset+overhang), cy-perpY*(offset+overhang));
+              gctx.stroke();
             }
           }
         }
