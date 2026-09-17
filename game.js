@@ -745,6 +745,81 @@ function aiConstructionTargetOnLandmass(owner, lm){
   return lo + Math.floor(Math.random()*(hi-lo+1));
 }
 
+// KI-Schwierigkeit hard: wie nah ist (x,y) an der Front? Kleinster Chebyshev-Abstand zu
+// einer gegnerischen (nicht verbündeten) Stadt, Festung oder lebenden Einheit — je kleiner,
+// desto exponierter. Grundlage sowohl für die taktische Ausbau-Platzierung (Festung/
+// Ausbauten gehören an die Grenze, nicht zufällig ins Hinterland) als auch für die
+// Erkennung akut bedrohter eigener Städte (siehe mostThreatenedUndersuppliedOwnCity).
+function frontierExposure(x, y, owner){
+  let best = Infinity;
+  for(const o of activeOwners()){
+    if(o===owner || areAllied(owner,o)) continue;
+    for(const c of citiesOf(o)){ const d=Math.max(Math.abs(c.x-x),Math.abs(c.y-y)); if(d<best) best=d; }
+    for(const f of fortressesOf(o)){ const d=Math.max(Math.abs(f.x-x),Math.abs(f.y-y)); if(d<best) best=d; }
+  }
+  for(const u of units){
+    if(u.hp<=0 || u.hostId || u.owner===owner || u.owner===OWNER_NEUTRAL || areAllied(owner,u.owner)) continue;
+    const d = Math.max(Math.abs(u.x-x), Math.abs(u.y-y));
+    if(d<best) best=d;
+  }
+  return best;
+}
+
+// KI-Schwierigkeit hard: die exponierteste eigene Kachel auf lm, die predicate erfüllt (für
+// die Wahl, WELCHE eigene Stadt/Festung einen Verteidigungsausbau bekommt) bzw. die
+// exponierteste unbebaute Kachel (für WO eine neue Festung/Stadt hingehört) — statt nur
+// "wo der Ingenieur gerade zufällig steht".
+function mostExposedOwnTileOnLandmass(owner, lm, predicate){
+  let best=null, bestExposure=Infinity;
+  for(let y=0;y<ROWS;y++){
+    for(let x=0;x<COLS;x++){
+      if(landmassId[y][x]!==lm) continue;
+      const t = map[y][x];
+      if(t.owner!==owner || !predicate(t)) continue;
+      const exp = frontierExposure(x,y,owner);
+      if(exp<bestExposure){ bestExposure=exp; best={x,y}; }
+    }
+  }
+  return best;
+}
+
+function mostExposedBuildableTileOnLandmass(owner, lm){
+  let best=null, bestExposure=Infinity;
+  for(let y=0;y<ROWS;y++){
+    for(let x=0;x<COLS;x++){
+      if(landmassId[y][x]!==lm) continue;
+      const t = map[y][x];
+      if(!([T_PLAIN,T_FOREST,T_HILLS,T_MOUNTAIN].includes(t.type)) || t.fortressLevel>0) continue;
+      const exp = frontierExposure(x,y,owner);
+      if(exp<bestExposure){ bestExposure=exp; best={x,y}; }
+    }
+  }
+  return best;
+}
+
+// KI-Schwierigkeit hard: gezielte Grenzverteidigung — wie viele EIGENE Bodeneinheiten
+// (Land+See teilen sich den 'ground'-Level) stehen gerade auf dieser Kachel?
+function ownGroundDefendersAt(x, y, owner){
+  return units.filter(u => u.x===x && u.y===y && u.hp>0 && !u.hostId && u.owner===owner && getLevel(u)==='ground').length;
+}
+
+// KI-Schwierigkeit hard: frisch produzierte Bodeneinheiten sollen bevorzugt eine akut
+// bedrohte, schwach besetzte eigene Grenzstadt verstärken statt blind zum Sammelpunkt/
+// Angriffsziel zu marschieren — löst sich von selbst wieder auf, sobald die Stadt genug
+// Verteidiger hat (dann liefert diese Funktion einfach die nächst-bedrohte oder null).
+const REINFORCE_EXPOSURE_THRESHOLD = 6;
+const REINFORCE_MIN_DEFENDERS = 2;
+function mostThreatenedUndersuppliedOwnCity(owner, lm){
+  let best=null, bestExposure=Infinity;
+  for(const c of citiesOf(owner)){
+    if(landmassId[c.y][c.x] !== lm) continue;
+    if(ownGroundDefendersAt(c.x, c.y, owner) >= REINFORCE_MIN_DEFENDERS) continue;
+    const exp = frontierExposure(c.x, c.y, owner);
+    if(exp <= REINFORCE_EXPOSURE_THRESHOLD && exp < bestExposure){ bestExposure=exp; best={x:c.x,y:c.y}; }
+  }
+  return best;
+}
+
 function isCoastal(x,y){
   return DIRS4.some(([dx,dy]) => {
     const nx=x+dx, ny=y+dy;
@@ -2928,11 +3003,23 @@ function processCityProduction(owner){
           // Städte fassen beliebig viele Einheiten — neue Einheiten spawnen direkt dort.
           const spawned = spawnUnit(owner, type, x, y);
           tile.buildPoints -= cost;
+          let lm = -1;
           if(owner!==OWNER_PLAYER){
-            const lm = (landmassId[y] && landmassId[y][x]!==undefined) ? landmassId[y][x] : -1;
+            lm = (landmassId[y] && landmassId[y][x]!==undefined) ? landmassId[y][x] : -1;
             tile.buildType = pickAiBuildType(isCoastal(x,y), tile, owner, lm);
           }
-          if(tile.rallyPoint && !(tile.rallyPoint.x===x && tile.rallyPoint.y===y)){
+          // KI-Schwierigkeit hard: eine frisch produzierte Bodeneinheit verstärkt bevorzugt
+          // eine akut bedrohte, schwach besetzte eigene Grenzstadt statt blind zum
+          // Sammelpunkt zu marschieren — fällt auf den normalen Sammelpunkt zurück, sobald
+          // keine solche Stadt (mehr) existiert oder sie unerreichbar ist.
+          let reinforced = false;
+          if(owner!==OWNER_PLAYER && difficultyAtLeast('hard') && UNIT_STATS[type].subclass==='land'){
+            const target = mostThreatenedUndersuppliedOwnCity(owner, lm);
+            if(target && !(target.x===x && target.y===y)){
+              reinforced = setDestination(spawned, target.x, target.y, true, true);
+            }
+          }
+          if(!reinforced && tile.rallyPoint && !(tile.rallyPoint.x===x && tile.rallyPoint.y===y)){
             setDestination(spawned, tile.rallyPoint.x, tile.rallyPoint.y, true, true);
           }
         }
@@ -3621,26 +3708,60 @@ function aiActEngineer(unit){
   // Ziel-Obergrenze (Gate B), damit die KI nicht jede Gelegenheit sofort nutzt.
   const myLmForBuild = (landmassId[unit.y] && landmassId[unit.y][unit.x]!==undefined) ? landmassId[unit.y][unit.x] : -1;
   const buildableGround = [T_PLAIN,T_FOREST,T_HILLS,T_MOUNTAIN].includes(tile.type);
+  // KI-Schwierigkeit hard: statt nur opportunistisch zu bauen, wenn der Ingenieur zufällig
+  // schon am richtigen Ort steht, sucht Schwer sich aktiv die exponierteste (grenznächste)
+  // eigene Kachel/den exponiertesten Bauplatz und marschiert gezielt dorthin (wie die
+  // bestehende taktische Radar-Platzierung oben) — Reise- und Bauzeit takten das schon von
+  // selbst, ein zusätzlicher Zufallswurf ist dafür nicht mehr nötig.
+  const isHardBuilder = difficultyAtLeast('hard');
   if(myLmForBuild>=0 && meetsAiConstructionGateA(owner, myLmForBuild)){
-    if(buildableGround && tile.fortressLevel===0 && Math.random()<0.35 &&
-       countOwnerStructuresOnLandmass(owner, myLmForBuild, t=>t.fortressLevel>0) < aiConstructionTargetOnLandmass(owner, myLmForBuild)){
-      startEngineerBuild(unit, 'fortress', 20);
-      return;
+    if(countOwnerStructuresOnLandmass(owner, myLmForBuild, t=>t.fortressLevel>0) < aiConstructionTargetOnLandmass(owner, myLmForBuild)){
+      if(isHardBuilder){
+        const spot = mostExposedBuildableTileOnLandmass(owner, myLmForBuild);
+        if(spot){
+          if(unit.x===spot.x && unit.y===spot.y){ startEngineerBuild(unit, 'fortress', 20); return; }
+          aiEngineerMoveTowards(unit, spot); return;
+        }
+      } else if(buildableGround && tile.fortressLevel===0 && Math.random()<0.35){
+        startEngineerBuild(unit, 'fortress', 20);
+        return;
+      }
     }
-    if(tile.type===T_CITY && !tile.ruined && tile.owner===owner && !tile.cityDefenseLevel && Math.random()<0.18 &&
-       countOwnerStructuresOnLandmass(owner, myLmForBuild, t=>t.type===T_CITY && t.cityDefenseLevel) < aiConstructionTargetOnLandmass(owner, myLmForBuild)){
-      startEngineerBuild(unit, 'cityDefense', 20);
-      return;
+    if(countOwnerStructuresOnLandmass(owner, myLmForBuild, t=>t.type===T_CITY && t.cityDefenseLevel) < aiConstructionTargetOnLandmass(owner, myLmForBuild)){
+      if(isHardBuilder){
+        const spot = mostExposedOwnTileOnLandmass(owner, myLmForBuild, t=>t.type===T_CITY && !t.ruined && !t.cityDefenseLevel);
+        if(spot){
+          if(unit.x===spot.x && unit.y===spot.y){ startEngineerBuild(unit, 'cityDefense', 20); return; }
+          aiEngineerMoveTowards(unit, spot); return;
+        }
+      } else if(tile.type===T_CITY && !tile.ruined && tile.owner===owner && !tile.cityDefenseLevel && Math.random()<0.18){
+        startEngineerBuild(unit, 'cityDefense', 20);
+        return;
+      }
     }
-    if(tile.fortressLevel===1 && tile.owner===owner && Math.random()<0.18 &&
-       countOwnerStructuresOnLandmass(owner, myLmForBuild, t=>t.fortressLevel===2) < aiConstructionTargetOnLandmass(owner, myLmForBuild)){
-      startEngineerBuild(unit, 'fortressDefense', 25);
-      return;
+    if(countOwnerStructuresOnLandmass(owner, myLmForBuild, t=>t.fortressLevel===2) < aiConstructionTargetOnLandmass(owner, myLmForBuild)){
+      if(isHardBuilder){
+        const spot = mostExposedOwnTileOnLandmass(owner, myLmForBuild, t=>t.fortressLevel===1);
+        if(spot){
+          if(unit.x===spot.x && unit.y===spot.y){ startEngineerBuild(unit, 'fortressDefense', 25); return; }
+          aiEngineerMoveTowards(unit, spot); return;
+        }
+      } else if(tile.fortressLevel===1 && tile.owner===owner && Math.random()<0.18){
+        startEngineerBuild(unit, 'fortressDefense', 25);
+        return;
+      }
     }
-    if(buildableGround && tile.fortressLevel===0 && Math.random()<0.15 &&
-       countOwnerStructuresOnLandmass(owner, myLmForBuild, t=>t.type===T_CITY && t.founded) < aiConstructionTargetOnLandmass(owner, myLmForBuild)){
-      startEngineerBuild(unit, 'foundCity', 50);
-      return;
+    if(countOwnerStructuresOnLandmass(owner, myLmForBuild, t=>t.type===T_CITY && t.founded) < aiConstructionTargetOnLandmass(owner, myLmForBuild)){
+      if(isHardBuilder){
+        const spot = mostExposedBuildableTileOnLandmass(owner, myLmForBuild);
+        if(spot){
+          if(unit.x===spot.x && unit.y===spot.y){ startEngineerBuild(unit, 'foundCity', 50); return; }
+          aiEngineerMoveTowards(unit, spot); return;
+        }
+      } else if(buildableGround && tile.fortressLevel===0 && Math.random()<0.15){
+        startEngineerBuild(unit, 'foundCity', 50);
+        return;
+      }
     }
   }
 
